@@ -28,6 +28,10 @@ runs/
 sessions/session_*.json
 sessions/smoke.json
 
+# The IP-to-ASN table is 8.5 MiB, rebuilt daily upstream, and re-fetchable in seconds:
+# tools/fetch_asn_table.py. Pinning a stale copy in git would be worse than downloading it.
+data/
+
 .DS_Store
 .idea/
 .vscode/

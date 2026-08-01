@@ -107,7 +107,14 @@ more.
 Turning strangers' claims into one number is where a naive design gets stuffed. Six rules:
 
 1. One observer, one vote — influence is capped per observer, and only the newest batch counts.
-2. Per-cluster weight caps — since identities are free but network diversity is not.
+2. Per-cluster weight caps — since identities are free but network diversity is not. A
+   peer's cluster comes from an ASN resolved *locally*, never from anything the peer
+   asserts: `TableAsnResolver` answers from an offline ip2asn table (573k routed ranges,
+   ~3.4s to load, sub-microsecond cached lookups) fetched by `tools/fetch_asn_table.py`.
+   Offline is a requirement, not a convenience — a DNS or whois lookup on the routing path
+   would add latency to every decision and let an attacker stall routing by stalling the
+   lookups. Addresses with no AS (private, loopback, unrouted) fall back to prefix
+   clustering.
 3. Weighted **median**, not mean — 50% breakdown point, so an attacker must control a
    majority of *weight*, which rule 2 has already made expensive.
 4. Collusion discount for observers vouching for peers in their own cluster.
@@ -176,10 +183,11 @@ calibrations are saved with provenance.
 Calibration must run on an all-honest population. Fitting on a population containing cheats
 widens the tolerance until the cheats fit inside it.
 
-**Tolerance is per compute-profile-pair, not global.** Measured (`spike/quantization/`):
-two honest servers holding identical weights disagree by ~0.005 across fp16/bf16/int8, but
-by **~0.055 when one of them is NF4** — an order of magnitude more, consistently, because
-NF4's own quantization error dominates any comparison it takes part in.
+**Tolerance is per compute-profile-pair, not global.** Measured across five real GPU
+architectures (`tools/calibrate/`): honest servers holding identical weights disagree by at
+most **0.0014** when hardware differs but precision matches, and by **0.033** when one of
+them is NF4 — roughly 23x more. Quantization dominates hardware, and no single global
+threshold covers both.
 
 Against a single global threshold fitted to the tighter modes, every NF4 comparison lands in
 the ambiguous band, and the ambiguous-rate gate (§5) then quarantines the honest NF4 server
@@ -195,6 +203,9 @@ act on.
 This matters most for the cheapest hardware. A 4GB laptop GPU hosts 28 NF4 blocks of an
 8B-class model versus 7 at fp16 — NF4 is what makes ordinary machines useful, so a design
 that quietly evicts NF4 servers evicts the volunteers the network most needs.
+
+Thresholds are no longer placeholders: `sessions/tolerance_table.json` is fitted from real
+measurements across T4, A100, RTX 3050, L4 and Blackwell hardware.
 
 ### 4.4 Sampling — `verification/sampler.py`
 

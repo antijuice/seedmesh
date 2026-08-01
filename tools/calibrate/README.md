@@ -81,23 +81,61 @@ Cross-mode pairs (`fp16 vs nf4`, and so on) pool every session combination, so t
 quantization error *and* hardware error together — which is what a real mixed swarm
 presents.
 
-A real single-GPU run (RTX 3050, real `llama-160m` weights, 32 samples) gives:
+## Results from a real 5-GPU run
+
+Collected 2026-07-31 across five architectures — Tesla T4 (Turing, cc 7.5), A100 (Ampere,
+8.0), RTX 3050 (Ampere, 8.6), L4 (Ada, 8.9), RTX PRO 6000 Blackwell (12.0) — 64 samples each.
+
+**Same mode, different hardware.** This is the number a single machine cannot produce, and
+the reason the exercise exists:
+
+| mode | max distance across GPUs |
+| --- | --- |
+| fp32 | 0.00000019 |
+| int8 | 0.0000063 |
+| nf4 | 0.00021 |
+| fp16 | 0.00016 |
+| **bf16** | **0.00143** |
+
+**Different modes** (p50, pooled across all GPU pairs):
 
 | pair | p50 | p99.9 |
 | --- | --- | --- |
-| fp16 vs fp32 | 0.00020 | 0.00026 |
-| bf16 vs fp16 | 0.00154 | 0.00219 |
-| int8 vs fp16 | 0.00522 | 0.00720 |
-| **nf4 vs fp16** | **0.03271** | 0.04495 |
+| fp16 vs fp32 | 0.00020 | 0.00028 |
+| bf16 vs fp16 | 0.00165 | 0.00247 |
+| int8 vs fp16 | 0.00528 | 0.00767 |
+| **nf4 vs fp16** | **0.03339** | 0.04515 |
 
-NF4 is an order of magnitude out from everything else — the finding that forced per-pair
-tolerances in the first place. Note these differ from the ~0.055 measured in
-`spike/quantization/`, which used synthetic weights and a different sequence length:
-**absolute distances are model- and shape-dependent, so calibrate for the model you serve.**
+Three things worth taking from this:
 
-Same-mode pairs are absent above because one machine cannot produce them. They should appear
-— and be non-zero — as soon as a second GPU type is merged. If they stay absent, the merge
-is wrong, not the hardware.
+**Quantization dominates hardware by ~23x.** The worst honest hardware disagreement (bf16,
+0.0014) is far below the smallest quantization gap that matters (nf4 vs fp16, 0.033). The
+per-pair tolerance design was necessary; a single global threshold could never have covered
+both.
+
+**fp32 is effectively bit-reproducible across five architectures** (1.9e-7), and int8 nearly
+so (6.3e-6) — int8 quantization being deterministic given identical weights. bf16 is the
+outlier at ~9x fp16, which follows from its shorter mantissa.
+
+**The earlier single-GPU warning was right in principle, overstated in detail.** The
+quantization spike said same-mode zeros were floor artefacts needing replacement. True for
+bf16 (0.0 → 0.0014) and fp16 (0.0 → 0.00016); for fp32 and int8 the single-GPU zero was
+nearly correct.
+
+Note these differ from the ~0.055 nf4 figure in `spike/quantization/`, which used synthetic
+weights and a different sequence length: **absolute distances are model- and shape-dependent,
+so calibrate for the model you actually serve.**
+
+### The floor is now the binding constraint for the tightest modes
+
+fp32 and int8 hit the `--floor` (1e-4) rather than their measured p99.9 (1.8e-7 and 6.3e-6).
+The fitter reports which pairs are floor-bound. The floor errs *permissive*, never hostile —
+but it costs sensitivity: a cheat perturbing fp32 output by under 1e-4 hides inside it, when
+the data would support a threshold ~500x tighter.
+
+Left at 1e-4 by default deliberately. Tightening on the evidence of five GPUs risks fitting
+a thin hardware sample, and a false accusation is the expensive error. Lower it with
+`--floor` once the sample is broader.
 
 ## Step 3 — use it
 

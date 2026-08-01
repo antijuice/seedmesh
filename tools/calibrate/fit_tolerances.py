@@ -63,6 +63,16 @@ def main() -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--fpr", type=float, default=0.001, help="target false-positive rate")
     parser.add_argument("--mismatch-multiplier", type=float, default=6.0)
+    parser.add_argument(
+        "--floor",
+        type=float,
+        default=1e-4,
+        help=(
+            "minimum match threshold. Guards against absurdly tight thresholds from a thin "
+            "sample -- but for high-precision modes it becomes the binding constraint and "
+            "costs detection sensitivity (see the floor-bound report below)."
+        ),
+    )
     args = parser.parse_args()
 
     sessions = load_sessions(args.sessions)
@@ -120,6 +130,7 @@ def main() -> int:
     print("-" * 86)
     table = ToleranceTable()
     skipped = []
+    floor_bound: list[tuple[str, float]] = []
 
     for key, values in sorted(distances.items(), key=lambda kv: sorted(kv[0])):
         profiles = sorted(key)
@@ -139,14 +150,27 @@ def main() -> int:
             collector.sample(),
             target_false_positive_rate=args.fpr,
             mismatch_multiplier=args.mismatch_multiplier,
+            floor=args.floor,
         )
         left_profile, right_profile = (profiles * 2)[:2]
         table.set(left_profile, right_profile, tolerance)
+        if tolerance.match_distance <= args.floor * 1.000001:
+            floor_bound.append((label, p999))
 
     if skipped:
         print("\nnot fitted (insufficient samples):")
         for label, reason in skipped:
             print(f"  {label}: {reason}")
+
+    if floor_bound:
+        print(f"\nfloor-bound pairs (--floor={args.floor:g} exceeds the measured p99.9):")
+        for label, p999 in floor_bound:
+            print(f"  {label:<52} measured p99.9 = {p999:.3e}")
+        print("  These modes agree far more tightly across hardware than the floor allows,")
+        print("  so the floor -- not the data -- sets their threshold. It errs permissive,")
+        print("  never hostile, but it costs sensitivity: a cheat perturbing output by less")
+        print("  than the floor hides inside it. Lower --floor to tighten, at the risk of")
+        print("  fitting noise from a thin hardware sample.")
 
     notes = (
         f"fitted from {len(sessions)} session(s) across {len(hardware)} GPU type(s): "

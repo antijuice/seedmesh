@@ -23,9 +23,11 @@ Seedmesh builds the missing half.
 > a *private* swarm now runs real inference through it end to end — discovery, routing,
 > per-server execution, and sampler-driven verification — see
 > [docs/petals-port.md](docs/petals-port.md). What that does not mean: no public network
-> exists, every verification threshold is still fitted to *simulated* noise rather than
-> measured hardware, and nothing has run on a GPU or at a useful model size. Said plainly
-> because this project's pitch is trust, and overstating readiness is a bad way to start.
+> exists, and inference has only run on CPU at toy model size on a single host. Verification
+> thresholds are measured across five real GPU architectures, and network clustering uses a
+> real offline ASN table — but a single-host swarm has no routable addresses, so ASN
+> separation itself is still only exercised against a simulated mapping. Said plainly because
+> this project's pitch is trust, and overstating readiness is a bad way to start.
 
 ---
 

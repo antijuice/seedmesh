@@ -1,64 +1,94 @@
 {
-  "notes": "fitted from 1 session(s) across 1 GPU type(s): ['NVIDIA GeForce RTX 3050 Laptop GPU']; model=JackFram/llama-160m block=0; target FPR=0.001, mismatch multiplier=6.0",
+  "notes": "fitted from 5 session(s) across 5 GPU type(s): ['NVIDIA A100-SXM4-40GB', 'NVIDIA GeForce RTX 3050 Laptop GPU', 'NVIDIA L4', 'NVIDIA RTX PRO 6000 Blackwell Server Edition', 'Tesla T4']; model=JackFram/llama-160m block=0; target FPR=0.001, mismatch multiplier=6.0",
   "tolerances": {
+    "int8/float16/eager|int8/float16/eager": {
+      "cosine_distance": 0.0001,
+      "match_distance": 0.0001,
+      "mismatch_distance": 0.0006000000000000001,
+      "norm_deviation": 0.0001
+    },
     "int8/float16/eager|nf4/float16/eager": {
-      "cosine_distance": 0.0004665154349093231,
-      "match_distance": 0.04665154349093231,
-      "mismatch_distance": 0.2799092609455939,
-      "norm_deviation": 0.00466515434909323
+      "cosine_distance": 0.0004680092282638521,
+      "match_distance": 0.04680092282638521,
+      "mismatch_distance": 0.2808055369583113,
+      "norm_deviation": 0.004680092282638521
     },
     "int8/float16/eager|none/bfloat16/eager": {
       "cosine_distance": 0.0001,
-      "match_distance": 0.007759302592648497,
-      "mismatch_distance": 0.046555815555890986,
-      "norm_deviation": 0.0007759302592648497
+      "match_distance": 0.007910821395884527,
+      "mismatch_distance": 0.047464928375307164,
+      "norm_deviation": 0.0007910821395884527
     },
     "int8/float16/eager|none/float16/eager": {
       "cosine_distance": 0.0001,
-      "match_distance": 0.007198933901050326,
-      "mismatch_distance": 0.043193603406301954,
-      "norm_deviation": 0.0007198933901050326
+      "match_distance": 0.007670677270711436,
+      "mismatch_distance": 0.04602406362426861,
+      "norm_deviation": 0.0007670677270711436
     },
     "int8/float16/eager|none/float32/eager": {
       "cosine_distance": 0.0001,
-      "match_distance": 0.007139972571946195,
-      "mismatch_distance": 0.04283983543167717,
-      "norm_deviation": 0.0007139972571946195
+      "match_distance": 0.0077032747251845985,
+      "mismatch_distance": 0.04621964835110759,
+      "norm_deviation": 0.0007703274725184598
+    },
+    "nf4/float16/eager|nf4/float16/eager": {
+      "cosine_distance": 0.0001,
+      "match_distance": 0.00020816258934447675,
+      "mismatch_distance": 0.0012489755360668604,
+      "norm_deviation": 0.0001
     },
     "nf4/float16/eager|none/bfloat16/eager": {
-      "cosine_distance": 0.00044350905200652644,
-      "match_distance": 0.04435090520065264,
-      "mismatch_distance": 0.26610543120391583,
-      "norm_deviation": 0.004435090520065264
+      "cosine_distance": 0.00044628874762381527,
+      "match_distance": 0.044628874762381525,
+      "mismatch_distance": 0.26777324857428914,
+      "norm_deviation": 0.004462887476238153
     },
     "nf4/float16/eager|none/float16/eager": {
-      "cosine_distance": 0.00044953081150207795,
-      "match_distance": 0.044953081150207796,
-      "mismatch_distance": 0.2697184869012468,
-      "norm_deviation": 0.004495308115020779
+      "cosine_distance": 0.00045152167089929177,
+      "match_distance": 0.045152167089929175,
+      "mismatch_distance": 0.27091300253957507,
+      "norm_deviation": 0.004515216708992917
     },
     "nf4/float16/eager|none/float32/eager": {
-      "cosine_distance": 0.000449708649145952,
-      "match_distance": 0.0449708649145952,
-      "mismatch_distance": 0.26982518948757117,
-      "norm_deviation": 0.00449708649145952
+      "cosine_distance": 0.00045164115555028817,
+      "match_distance": 0.04516411555502882,
+      "mismatch_distance": 0.27098469333017294,
+      "norm_deviation": 0.004516411555502882
+    },
+    "none/bfloat16/eager|none/bfloat16/eager": {
+      "cosine_distance": 0.0001,
+      "match_distance": 0.001432854933664171,
+      "mismatch_distance": 0.008597129601985026,
+      "norm_deviation": 0.0001432854933664171
     },
     "none/bfloat16/eager|none/float16/eager": {
       "cosine_distance": 0.0001,
-      "match_distance": 0.0021871729881100164,
-      "mismatch_distance": 0.013123037928660097,
-      "norm_deviation": 0.00021871729881100166
+      "match_distance": 0.0024739011644959834,
+      "mismatch_distance": 0.0148434069869759,
+      "norm_deviation": 0.00024739011644959834
     },
     "none/bfloat16/eager|none/float32/eager": {
       "cosine_distance": 0.0001,
-      "match_distance": 0.0022282264986246054,
-      "mismatch_distance": 0.013369358991747633,
-      "norm_deviation": 0.00022282264986246055
+      "match_distance": 0.0024304206744841885,
+      "mismatch_distance": 0.014582524046905132,
+      "norm_deviation": 0.00024304206744841882
+    },
+    "none/float16/eager|none/float16/eager": {
+      "cosine_distance": 0.0001,
+      "match_distance": 0.0001596375466602453,
+      "mismatch_distance": 0.0009578252799614718,
+      "norm_deviation": 0.0001
     },
     "none/float16/eager|none/float32/eager": {
       "cosine_distance": 0.0001,
-      "match_distance": 0.0002561261444413986,
-      "mismatch_distance": 0.0015367568666483915,
+      "match_distance": 0.00028410508793461835,
+      "mismatch_distance": 0.00170463052760771,
+      "norm_deviation": 0.0001
+    },
+    "none/float32/eager|none/float32/eager": {
+      "cosine_distance": 0.0001,
+      "match_distance": 0.0001,
+      "mismatch_distance": 0.0006000000000000001,
       "norm_deviation": 0.0001
     }
   },

@@ -482,11 +482,25 @@ GeoIP lookup provides.
 — quant type, dtype, kernel — travels in its DHT record, which is exactly what §3.2 requires
 for per-pair tolerance selection.
 
+**Thresholds are now measured, not simulated.** `tools/calibrate/` collected sessions across
+five real GPU architectures (T4, A100, RTX 3050, L4, Blackwell) and fitted a 15-pair
+`ToleranceTable`, which the live pipeline loads — the demo now verifies against
+`match<=0.000100` rather than the `0.02` placeholder. Headline: honest *hardware* disagreement
+peaks at 0.0014 (bf16) while NF4-vs-fp16 is 0.033, so quantization dominates hardware ~23x
+and per-pair tolerances were necessary.
+
+**A real ASN table is now wired in.** `TableAsnResolver` answers from an offline ip2asn
+table — 573,088 routed ranges, ~3.4s to load, sub-microsecond cached lookups, fetched by
+`tools/fetch_asn_table.py`. Offline matters: a DNS/whois lookup on the routing path would be
+both a per-decision latency cost and a way for an attacker to stall routing.
+
 **Remaining gaps, in priority order:**
-- **Every threshold is still fitted to simulated noise.** `tools/calibrate/` is built and
-  smoke-tested on a real GPU; it needs Colab sessions across several GPU types (M2). This is
-  now the only thing between "verification runs" and "verification means something".
-- **No real ASN table** is wired into `ClusterIndex` yet — the demo uses a simulated one.
+- **fp32 and int8 thresholds are floor-bound**, not data-bound: measured agreement is
+  ~500x tighter than the 1e-4 floor allows, costing detection sensitivity.
+- **A single-host swarm cannot exercise ASN diversity** — loopback has no AS, so the demo
+  still simulates distinct autonomous systems to drive the rest of the path. Real separation
+  needs peers on genuinely different networks.
+- One small model, one block, CPU-only inference.
 
 **llama.cpp RPC as a second backend later**, behind the same seam, for private/LAN meshes —
 where it is nearly ideal and where its security model is not disqualifying.

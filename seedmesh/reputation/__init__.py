@@ -20,6 +20,7 @@ from seedmesh.reputation.diversity import (
     ClusterIndex,
     NullAsnResolver,
     StaticAsnResolver,
+    TableAsnResolver,
     UNKNOWN_CLUSTER,
 )
 from seedmesh.reputation.records import (
@@ -51,6 +52,7 @@ __all__ = [
     "ScoreBreakdown",
     "ScorerConfig",
     "StaticAsnResolver",
+    "TableAsnResolver",
     "UNKNOWN_CLUSTER",
     "blend",
     "build_batch",

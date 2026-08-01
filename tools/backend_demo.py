@@ -21,11 +21,34 @@ import numpy as np
 from seedmesh.backends.petals_backend import PetalsBackend
 from seedmesh.core.clock import SystemClock
 from seedmesh.core.types import Observation
-from seedmesh.reputation.diversity import ClusterIndex, StaticAsnResolver
+from seedmesh.reputation.diversity import ClusterIndex, StaticAsnResolver, TableAsnResolver
 from seedmesh.reputation.routing_bias import Router
 from seedmesh.reputation.scorer import ReputationScorer
+from seedmesh.verification.calibrate import ToleranceTable
 from seedmesh.verification.compare import Tolerance, compare_sketches
 from seedmesh.verification.sampler import SamplerConfig, VerificationSampler
+
+# Anchored to the repo, not the cwd: the swarm scripts run clients from /tmp, and a
+# relative default would silently fall back to placeholder thresholds there.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+TOLERANCE_TABLE = Path(
+    os.environ.get("TOLERANCE_TABLE", str(REPO_ROOT / "sessions" / "tolerance_table.json"))
+)
+ASN_TABLE = Path(
+    os.environ.get("ASN_TABLE", str(REPO_ROOT / "data" / "ip2asn-combined.tsv.gz"))
+)
+
+
+def load_tolerances() -> ToleranceTable | None:
+    """Measured thresholds if calibration has been run, else None.
+
+    Without a table the sampler falls back to a single global `Tolerance()` -- placeholder
+    numbers fitted to simulated noise. With one, every comparison is judged against a
+    threshold measured from real honest disagreement between real GPUs.
+    """
+    if not TOLERANCE_TABLE.exists():
+        return None
+    return ToleranceTable.load(TOLERANCE_TABLE)
 
 MODEL = os.environ.get("MODEL", "JackFram/llama-160m")
 CLIENT_ID = "smdemoclient0"
@@ -122,6 +145,20 @@ def main() -> int:
             f"...{subject.peer_id[-8:]} vs ...{verifier.peer_id[-8:]}"
         )
 
+        tolerances = load_tolerances()
+        if tolerances is None:
+            tolerance = Tolerance()
+            print(f"  tolerance: PLACEHOLDER (no table at {TOLERANCE_TABLE}) "
+                  f"match<={tolerance.match_distance}")
+        else:
+            tolerance = tolerances.get(subject.profile.key, verifier.profile.key)
+            if tolerance is None:
+                print(f"  no calibration for {subject.profile.key} vs {verifier.profile.key}")
+                print("  -> this pair is unverifiable; refusing rather than guessing")
+                return 0
+            print(f"  tolerance: MEASURED, match<={tolerance.match_distance:.6f} "
+                  f"mismatch>={tolerance.mismatch_distance:.6f}")
+
         probe = rng.standard_normal((4, backend.config.hidden_size)).astype(np.float32)
         check_nonce = b"\x99" * 16
         left = backend.run_segment(subject, block_range, probe, nonce=check_nonce, step=0)
@@ -131,37 +168,50 @@ def main() -> int:
             print("  one side failed; verification inconclusive")
             return 1
 
-        comparison = compare_sketches(left.sketch, right.sketch, Tolerance())
+        comparison = compare_sketches(left.sketch, right.sketch, tolerance)
         print(f"  relative distance: {comparison.relative_distance:.6f}")
         print(f"  cosine distance:   {comparison.cosine_distance:.8f}")
         print(f"  verdict:           {comparison.verdict.value}  ({comparison.reason})")
 
         # --- 5. does the diversity constraint now have something to work with? ---
         print("\ndiversity check:")
-        print(f"  default resolver (no ASN table): independent={clusters.are_independent(subject, verifier)}")
+        print(f"  prefix-only resolver: independent={clusters.are_independent(subject, verifier)}")
         print(f"    {subject.address} -> {clusters.coarse_of(subject)}")
         print(f"    {verifier.address} -> {clusters.coarse_of(verifier)}")
         print("    Both loopback addresses share a /16, so they are correctly judged the")
         print("    same network -- on one host, that is the truthful answer.")
 
-        # A real deployment resolves ASNs from an offline table (GeoLite2, Team Cymru).
-        # StaticAsnResolver stands in for that here, mapping the distinct loopback
-        # addresses to distinct autonomous systems the way real peers on different networks
-        # would resolve. This is the only simulated part of this demo, and it is labelled.
+        # The real offline table, if it has been fetched.
+        if ASN_TABLE.exists():
+            real = TableAsnResolver.from_file(ASN_TABLE)
+            print(f"\n  real ASN table ({len(real):,} routed ranges) on public addresses:")
+            for probe_ip, who in (("8.8.8.8", "Google"), ("1.1.1.1", "Cloudflare")):
+                print(f"    {probe_ip:16s} -> AS{real.resolve(probe_ip)}  ({who})")
+            print("  ...and on this swarm's peers:")
+            for server in servers:
+                print(f"    {server.address:16s} -> {real.resolve(server.address)}"
+                      f"  (loopback is not routed, so no AS -- correct)")
+        else:
+            print(f"\n  real ASN table absent ({ASN_TABLE}); run tools/fetch_asn_table.py")
+
+        # A localhost swarm has no routable addresses, so the real table cannot separate
+        # these peers -- correctly. To exercise the rest of the path, stand in for what a
+        # real deployment sees: peers in genuinely different autonomous systems. This is
+        # the ONLY simulated input remaining, and only because the swarm is single-host.
         simulated_asns = {
             server.address: 64500 + index
             for index, server in enumerate(s for s in servers if s.address)
         }
         geo_clusters = ClusterIndex(StaticAsnResolver(simulated_asns))
         independent = geo_clusters.are_independent(subject, verifier)
-        print(f"\n  with an ASN table (simulated GeoIP): independent={independent}")
+        print(f"\n  simulated distinct-AS peers: independent={independent}")
         print(f"    {subject.address} -> {geo_clusters.coarse_of(subject)}")
         print(f"    {verifier.address} -> {geo_clusters.coarse_of(verifier)}")
 
         # --- 6. the sampler, end to end -----------------------------------------
         sampler = VerificationSampler(
             scorer, geo_clusters, SamplerConfig(min_first_seen_gap_s=0.0),
-            rng=random.Random(0),
+            rng=random.Random(0), tolerances=tolerances,
         )
         chosen = sampler.select_verifier(subject, block_range, [verifier])
         print(f"\n  sampler picks a verifier for ...{subject.peer_id[-8:]}: "
@@ -171,7 +221,9 @@ def main() -> int:
             left2 = backend.run_segment(subject, block_range, probe, nonce=task.nonce, step=0)
             right2 = backend.run_segment(chosen, block_range, probe, nonce=task.nonce, step=0)
             if left2.ok and right2.ok:
-                verdict = compare_sketches(left2.sketch, right2.sketch, Tolerance())
+                verdict = compare_sketches(
+                    left2.sketch, right2.sketch, task.tolerance or tolerance
+                )
                 sampler.record_outcome(task, verdict.verdict, comparable=verdict.comparable)
                 print(f"  sampler-driven verification: {verdict.verdict.value} "
                       f"(distance {verdict.relative_distance:.6f})")
