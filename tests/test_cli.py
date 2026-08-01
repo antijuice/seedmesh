@@ -237,3 +237,33 @@ def test_ipv6_uses_the_ip6_protocol_token():
     from seedmesh.cli.main import _announce_maddr
 
     assert _announce_maddr("2606:4700:4700::1111", 31337) == "/ip6/2606:4700:4700::1111/tcp/31337"
+
+
+# ---- shutdown noise ---------------------------------------------------------
+
+
+def test_hivemind_finalizer_noise_is_suppressed_but_other_errors_are_not():
+    """After a working chat, hivemind's P2P.__del__ printed three tracebacks -- the last
+    thing a volunteer sees, and it reads like a crash. Suppress those, and only those."""
+    import sys
+    import types
+
+    from seedmesh.cli.main import _quiet_hivemind_finalizers
+
+    original = sys.unraisablehook
+    seen = []
+    try:
+        sys.unraisablehook = lambda u: seen.append(u)
+        _quiet_hivemind_finalizers()
+
+        noisy = types.SimpleNamespace()
+        noisy.__module__ = "hivemind.p2p.p2p_daemon"
+        sys.unraisablehook(types.SimpleNamespace(object=noisy, exc_type=RuntimeError))
+        assert seen == [], "hivemind p2p shutdown noise should be swallowed"
+
+        real = types.SimpleNamespace()
+        real.__module__ = "seedmesh.reputation.scorer"
+        sys.unraisablehook(types.SimpleNamespace(object=real, exc_type=RuntimeError))
+        assert len(seen) == 1, "a genuine unraisable error must still surface"
+    finally:
+        sys.unraisablehook = original

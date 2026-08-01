@@ -46,40 +46,44 @@ account can never succeed. Swap and the firewall have to be in place before you 
 it. (Don't "fix" this by giving the account a password and sudo rights: a passwordless,  
 non-privileged account is the point. It runs a daemon exposed to the internet.) 
     
-    `\`ssh root@YOUR_IP    
+    `\`\\`ssh root@YOUR_IP      
       
-    apt update && apt install -y python3-venv python3-pip git    
+    apt update && apt install -y python3-venv python3-pip git      
+    \\`    
     \`  
     `
 
 **Swap, before anything downloads torch.** A 1 GB box OOMs during the install without it,  
 and the `fstab` line is what makes it survive a reboot: 
     
-    `\`fallocate -l 2G /swapfile && chmod 600 /swapfile    
-    mkswap /swapfile && swapon /swapfile    
-    grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab    
-    free -h        # confirm a non-zero Swap row    
+    `\`\\`fallocate -l 2G /swapfile && chmod 600 /swapfile      
+    mkswap /swapfile && swapon /swapfile      
+    grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab      
+    free -h        # confirm a non-zero Swap row      
+    \\`    
     \`  
     `
 
 **Firewall.** Allow SSH _before_ enabling, or you lock yourself out of the box.  
 `--force` skips the "may disrupt existing ssh connections" prompt: 
     
-    `\`ufw allow OpenSSH    
-    ufw allow 31337/tcp    
-    ufw --force enable    
-    ufw status     # confirm both rules are listed    
+    `\`\\`ufw allow OpenSSH      
+    ufw allow 31337/tcp      
+    ufw --force enable      
+    ufw status     # confirm both rules are listed      
+    \\`    
     \`  
     `
 
 Now create the unprivileged account and install as that user: 
     
-    `\`adduser --disabled-password --gecos "" seedmesh    
-    su - seedmesh    
+    `\`\\`adduser --disabled-password --gecos "" seedmesh      
+    su - seedmesh      
       
-    git clone <this repo> ~/seedmesh && cd ~/seedmesh    
-    python3 -m venv ~/.venv && ~/.venv/bin/pip install -e .    
-    ~/.venv/bin/seedmesh setup    
+    git clone <this repo> ~/seedmesh && cd ~/seedmesh      
+    python3 -m venv ~/.venv && ~/.venv/bin/pip install -e .      
+    ~/.venv/bin/seedmesh setup      
+    \\`    
     \`  
     `
 
@@ -104,112 +108,105 @@ bootstrap "starts fine" and nobody can reach it.
 
 ## Start it
 
-A bootstrap peer is a **DHT node**, not a server hosting zero blocks. It takes no `--model`
-at all — a DHT node relays discovery for whatever swarm forms on top of it, so one bootstrap
-serves any model.
+A bootstrap peer is a **DHT node**, not a server hosting zero blocks. It takes no `--model`  
+at all — a DHT node relays discovery for whatever swarm forms on top of it, so one bootstrap  
+serves any model. 
+    
+    `~/.venv/bin/seedmesh bootstrap --port 31337 --announce-ip YOUR_PUBLIC_IP  
+    `
 
-```bash
-~/.venv/bin/seedmesh bootstrap --port 31337 --announce-ip YOUR_PUBLIC_IP
-```
-
-Substitute your real public IPv4 — `curl -4 ifconfig.me` prints it. The command refuses a
+Substitute your real public IPv4 — `curl -4 ifconfig.me` prints it. The command refuses a  
 placeholder or a private address rather than starting up unreachable.
 
-`--announce-ip` is what the peer *tells* others to dial. It must be the public address: most
+`--announce-ip` is what the peer _tells_ others to dial. It must be the public address: most  
 VPSs only see their private one locally and would otherwise advertise something unroutable.
 
-> **Corrected 2026-08-01.** This section previously said to run
-> `seedmesh serve --num-blocks 0` and called it a tested configuration. It is neither.
-> With no blocks, Petals builds a `ModuleAnnouncerThread` from an empty uid list and dies on
-> `module_uids[0]` with `IndexError: list index out of range` — but only *after* about a
-> minute of throughput measurement, so it prints `Running a server on /ip4/...` and looks
-> healthy first. The test that "verified" it ran 30 seconds and stopped before the failing
+> **Corrected 2026-08-01\.** This section previously said to run  
+> `seedmesh serve --num-blocks 0` and called it a tested configuration. It is neither.  
+> With no blocks, Petals builds a `ModuleAnnouncerThread` from an empty uid list and dies on  
+> `module_uids[0]` with `IndexError: list index out of range` — but only _after_ about a  
+> minute of throughput measurement, so it prints `Running a server on /ip4/...` and looks  
+> healthy first. The test that "verified" it ran 30 seconds and stopped before the failing  
 > path executed. `seedmesh serve --num-blocks 0` now refuses immediately and points here.
->
-> Verified for the replacement: `seedmesh bootstrap` ran 180s with zero tracebacks and 12
-> status reports; a block-hosting server then joined it, announced `blocks [0]`, reached
-> `Started`, and both processes were still alive 60s later with the bootstrap's routing
-> table showing **2 DHT nodes and 2 keys**.
+> 
+> Verified for the replacement: `seedmesh bootstrap` ran 180s with zero tracebacks and 12  
+> status reports; a block-hosting server then joined it, announced `blocks [0]`, reached  
+> `Started`, and both processes were still alive 60s later with the bootstrap's routing  
+> table showing **2 DHT nodes and 2 keys**. 
 
-It prints its address:
+It prints its address: 
+    
+    `To connect other peers to this one, use --initial_peers /ip4/159.89.52.179/tcp/31337/p2p/QmTG981oPjsPFX5WWNegdXmkiNUgWqjUvK9spieg4hSi1h  
+    `
 
-```
-Running a DHT instance. To connect other peers to this one, use
---initial_peers /ip4/159.89.52.179/tcp/31337/p2p/12D3KooWAeMSXtoLEY...
-```
-
-**That whole `/ip4/.../p2p/...` string is the bootstrap address.** Send it to your friends
+**That whole `/ip4/.../p2p/...` string is the bootstrap address.** Send it to your friends  
 verbatim; it is what they pass to `--initial-peers`.
 
-The peer id comes from `--identity-path` (default `~/.seedmesh/bootstrap.key`), so it stays
-stable across restarts as long as you keep that file. Losing it means a new address and
+The peer id comes from `--identity-path` (default `~/.seedmesh/bootstrap.key`), so it stays  
+stable across restarts as long as you keep that file. Losing it means a new address and  
 everyone re-pasting it.
 
 ## Keep it running
 
-As **root** (the `seedmesh` account has no sudo — see Provision above):
-
-```bash
-tee /etc/systemd/system/seedmesh-bootstrap.service >/dev/null <<'EOF'
-[Unit]
-Description=Seedmesh bootstrap peer
-After=network-online.target
-
-[Service]
-User=seedmesh
-WorkingDirectory=/home/seedmesh/seedmesh
-ExecStart=/home/seedmesh/.venv/bin/seedmesh bootstrap --port 31337 --announce-ip YOUR_PUBLIC_IP
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl enable --now seedmesh-bootstrap
-systemctl status seedmesh-bootstrap
-journalctl -u seedmesh-bootstrap -f
-```
+As **root** (the `seedmesh` account has no sudo — see Provision above): 
+    
+    `tee /etc/systemd/system/seedmesh-bootstrap.service >/dev/null <<'EOF'  
+    [Unit]  
+    Description=Seedmesh bootstrap peer  
+    After=network-online.target  
+      
+    [Service]  
+    User=seedmesh  
+    WorkingDirectory=/home/seedmesh/seedmesh  
+    ExecStart=/home/seedmesh/.venv/bin/seedmesh bootstrap --port 31337 --announce-ip YOUR_PUBLIC_IP  
+    Restart=always  
+    RestartSec=10  
+      
+    [Install]  
+    WantedBy=multi-user.target  
+    EOF  
+      
+    systemctl enable --now seedmesh-bootstrap  
+    systemctl status seedmesh-bootstrap  
+    journalctl -u seedmesh-bootstrap -f  
+    `
 
 ## Check it from outside
 
-From your own machine, not the VPS:
+From your own machine, not the VPS: 
+    
+    `nc -vz YOUR_PUBLIC_IP 31337  
+    `
 
-```bash
-nc -vz YOUR_PUBLIC_IP 31337
-```
-
-If `nc` fails, it is a firewall — provider-level before OS-level, in that order of
+If `nc` fails, it is a firewall — provider-level before OS-level, in that order of  
 likelihood.
 
-Then, with someone hosting blocks:
+Then, with someone hosting blocks: 
+    
+    `seedmesh chat --model JackFram/llama-160m --initial-peers <the address>  
+    `
 
-```bash
-seedmesh chat --model JackFram/llama-160m --initial-peers <the address>
-```
-
-A bootstrap alone serves no model. Until at least one peer hosts blocks, a client will
+A bootstrap alone serves no model. Until at least one peer hosts blocks, a client will  
 connect and find nothing to route through.
 
 ## What your friends do
 
-Nothing special. Behind NAT is fine for *them*:
+Nothing special. Behind NAT is fine for _them_: 
+    
+    `seedmesh serve --model JackFram/llama-160m --initial-peers /ip4/YOUR_IP/tcp/31337/p2p/Qm... --public-name "alice"  
+    `
 
-```bash
-seedmesh serve --model JackFram/llama-160m --initial-peers /ip4/YOUR_IP/tcp/31337/p2p/Qm... --public-name "alice"
-```
-
-Everyone must use the **identical** `--model` string — it sets the DHT prefix, so a mismatch
+Everyone must use the **identical** `--model` string — it sets the DHT prefix, so a mismatch  
 puts people in separate swarms with no error message.
 
-Petals detects that a peer is not directly reachable and routes it through relays
-automatically — that is exactly what the bootstrap is for. See
+Petals detects that a peer is not directly reachable and routes it through relays  
+automatically — that is exactly what the bootstrap is for. See  
 [NAT-AND-RELAYS.md](NAT-AND-RELAYS.md).
 
 ## Cost and honesty
 
-One box, a few dollars a month, and it is what decouples the swarm's existence from any one
-person's laptop being open. It is also the single point whose loss takes the swarm down
-until a new address is circulated — which is why the design treats bootstrap peers as
-*entry points, not authority*: they hold no reputation state and cannot censor routing.
-Running two, in different providers, removes even that.
+One box, a few dollars a month, and it is what decouples the swarm's existence from any one  
+person's laptop being open. It is also the single point whose loss takes the swarm down  
+until a new address is circulated — which is why the design treats bootstrap peers as  
+_entry points, not authority_: they hold no reputation state and cannot censor routing.  
+Running two, in different providers, removes even that. 

@@ -284,6 +284,29 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
 # ---- chat -------------------------------------------------------------------
 
 
+def _quiet_hivemind_finalizers() -> None:
+    """Suppress the three tracebacks hivemind prints on the way out.
+
+    `P2P.__del__` -> `cancel_task_if_running` -> `asyncio.get_event_loop()` raises under
+    uvloop once the loop is gone, and CPython reports that as an "Exception ignored in"
+    traceback. It happens *after* an explicit `dht.shutdown()`, so nothing is leaked -- but
+    it is the last thing on screen after a working session and it reads like a crash.
+
+    Scoped to hivemind.p2p so a real unraisable error elsewhere still surfaces.
+    """
+    import sys
+
+    previous = sys.unraisablehook
+
+    def hook(unraisable):
+        owner = getattr(unraisable.object, "__module__", "") or ""
+        if owner.startswith("hivemind.p2p"):
+            return
+        previous(unraisable)
+
+    sys.unraisablehook = hook
+
+
 def _cmd_chat(args: argparse.Namespace) -> int:
     """Minimal interactive client against a swarm."""
     try:
@@ -300,6 +323,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     if not peers:
         print("--initial-peers is required (ask whoever runs the swarm for the address).")
         return 2
+
+    _quiet_hivemind_finalizers()
 
     print(f"connecting to {peers[0]}")
     # Build the DHT before the model: hivemind allocates shared memory on first DHT
