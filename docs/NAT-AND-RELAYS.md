@@ -68,3 +68,37 @@ a second reachable peer helps more than anything else.
 out and its terms discourage long-running non-interactive workloads, so treat it as a
 test node rather than a contributor. Note also that Colab egress is Google's AS15169, so two
 Colab nodes count as the *same* network cluster and cannot verify each other.
+
+## Measured: relayed hosting is unreliable (2026-08-01)
+
+Relays work, but not well. Measured against a real NAT'd laptop server hosting all 12 blocks
+of `JackFram/llama-160m`, reached through a VPS bootstrap, `using_relay=True`:
+
+| | |
+| --- | --- |
+| healthy request latency | median **0.88s**, max **3.93s** (n=14) |
+| stall rate | **~1 request in 3** (6/20 at a 60s timeout, 14/30 at 8s) |
+| do stalls recover? | **never** — they sit until the timeout, whatever it is set to |
+| does an immediate fresh attempt work? | **yes, 14/14**, in ~1.2s |
+
+Two consequences:
+
+**A long timeout is actively harmful.** Since a stalled request never completes, the timeout
+only decides how long a doomed request blocks. Petals' 180s default turns a one-second retry
+into a three-minute hang. `seedmesh chat` defaults to 30s for this reason.
+
+**A stall that lands mid-generation still kills the request.** Petals' recovery path rebuilds
+the server session at position 0 while the client is mid-sequence, so it raises
+`AssertionError('0 and N')`. Setting the position instead trips the session's pre-allocated
+length (`prefix 16 + current 17 exceeds pre-allocated maximum 23`), because regeneration
+resends the whole prefix. Fixing it properly means changing how the outer step loop re-feeds
+inputs after a failure — not just the session bookkeeping. Untouched for now, and the reason
+roughly one prompt in three still fails on a relayed swarm.
+
+### So: forward the port if you can
+
+If you are hosting and can forward **TCP 31337** to your machine on your router, do it.
+Petals' `check_direct_reachability` will then succeed, the server runs as a full peer instead
+of `client_mode`, and none of the above applies — no relay, no stalls. Relaying is the
+fallback for volunteers who cannot change their router, and it should be described to them as
+"works, intermittently" rather than "works".

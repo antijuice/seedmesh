@@ -25,13 +25,21 @@ from seedmesh import __version__
 
 DEFAULT_MODEL = "JackFram/llama-160m"
 
-# Match Petals' own ClientConfig.request_timeout (3 * 60). An earlier value of 60s was a
-# self-inflicted failure: a relayed step on a real NAT'd swarm took longer than that, the
-# request timed out, and Petals' retry path then blew up with
-# AssertionError('0 and 37') because it rebuilds a server session at position 0 while the
-# client is mid-generation. Tightening upstream's timeout without measuring the slow path
-# turned a slow request into a crash.
-CHAT_REQUEST_TIMEOUT = 3 * 60
+# Measured on a real relayed swarm (2026-08-01, 20 + 30 request runs against a NAT'd
+# laptop server) rather than inherited from Petals' 180s default:
+#
+#   healthy latency   median 0.88s, max 3.93s, nothing above 5s
+#   stall rate        ~1 request in 3
+#   stalls            NEVER self-recover -- they sit until whatever timeout is set
+#   fresh attempt     succeeded 14/14 immediately after a stall
+#
+# Because a stalled request never completes, a long timeout rescues nothing; it only delays
+# the retry that actually works. Petals' 180s turns a one-second recovery into a
+# three-minute hang. 10s is ~2.5x the slowest healthy request seen here -- short, because
+# retrying with a fresh session (see generate_with_retry) is the real recovery mechanism.
+# Raise both with --timeout / --attempts for a large model on a slow link.
+CHAT_REQUEST_TIMEOUT = 10
+CHAT_ATTEMPTS = 4
 
 
 # ---- simulate ---------------------------------------------------------------
@@ -393,6 +401,34 @@ def _quiet_hivemind_finalizers() -> None:
     sys.unraisablehook = hook
 
 
+def generate_with_retry(generate, attempts=CHAT_ATTEMPTS, on_retry=None):
+    """Run `generate`, retrying on a stalled request with a brand-new inference session.
+
+    Measured on a relayed swarm: ~1 request in 3 stalls forever, but a *fresh* attempt
+    succeeded 14/14 immediately afterwards, in ~1.2s. So the failure is per-session, not
+    per-peer -- retrying is nearly free and nearly always works.
+
+    This deliberately sits above Petals rather than inside it. Petals' own retry reuses the
+    inference session and rebuilds only the failed span, which is exactly the path that
+    raises AssertionError('0 and N') -- it restarts a server session at position 0 while the
+    client is mid-sequence. A new session has no position to disagree about, so retrying at
+    this level sidesteps that bug instead of triggering it. `max_retries=1` on the client
+    keeps Petals from taking the broken path first.
+
+    Independent attempts at a ~1/3 stall rate: 4 attempts leaves roughly a 1.2% chance of
+    giving up, against 33% with none.
+    """
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return generate()
+        except Exception as exc:  # noqa: BLE001 -- reported below if every attempt fails
+            last_error = exc
+            if attempt < attempts and on_retry is not None:
+                on_retry(attempt, exc)
+    raise last_error
+
+
 def explain_inference_failure(exc: BaseException) -> str:
     """Turn a routing failure into something a volunteer can act on.
 
@@ -457,7 +493,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     # see CHAT_REQUEST_TIMEOUT.
     model = AutoDistributedModelForCausalLM.from_pretrained(
         args.model, initial_peers=peers, torch_dtype=torch.float32,
-        request_timeout=args.timeout, max_retries=3,
+        request_timeout=args.timeout, max_retries=1,
     )
     print("connected. Type a prompt, or Ctrl-C to quit.\n")
 
@@ -470,11 +506,17 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             if not prompt:
                 continue
             inputs = tokenizer(prompt, return_tensors="pt")["input_ids"]
-            try:
+            def run():
                 with torch.inference_mode():
-                    outputs = model.generate(
+                    return model.generate(
                         inputs, max_new_tokens=args.max_new_tokens, do_sample=False
                     )
+
+            def note_retry(attempt, exc):
+                print(f"  (attempt {attempt} stalled, retrying)", flush=True)
+
+            try:
+                outputs = generate_with_retry(run, args.attempts, note_retry)
             except Exception as exc:
                 print(explain_inference_failure(exc))
                 continue
@@ -566,7 +608,9 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--initial-peers", "--initial_peers", nargs="+", default=None)
     chat.add_argument("--max-new-tokens", "--max_new_tokens", type=int, default=32)
     chat.add_argument("--timeout", type=float, default=CHAT_REQUEST_TIMEOUT,
-                      help="per-request timeout in seconds; relayed peers are slow")
+                      help="per-attempt timeout in seconds")
+    chat.add_argument("--attempts", type=int, default=CHAT_ATTEMPTS,
+                      help="retries with a fresh session when a request stalls")
 
     simulate = subparsers.add_parser(
         "simulate", help="run trust-layer scenarios against the swarm simulator"

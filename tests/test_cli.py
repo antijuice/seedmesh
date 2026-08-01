@@ -348,12 +348,80 @@ def test_an_unrecognised_error_is_reported_verbatim_not_swallowed():
     assert "ValueError" in message and "something else entirely" in message
 
 
-def test_chat_does_not_tighten_the_upstream_request_timeout(parser):
-    """Regression: --timeout defaulted to 60s, a third of Petals' own 180s. On a real
-    relayed swarm a step exceeded 60s, the request timed out, and Petals' retry path then
-    raised AssertionError('0 and 37') rebuilding a server session at position 0 while the
-    client was mid-generation. Tightening upstream's timeout turned slow into crashed."""
+def test_chat_timeout_is_short_enough_to_retry(parser):
+    """Measured, not inherited. On a relayed swarm ~1 request in 3 stalls, a stall never
+    self-recovers, and a fresh attempt succeeded 14/14 immediately afterwards. Healthy
+    requests finished in under 4s. So the timeout only decides how long a doomed request
+    blocks: Petals' 180s default makes a one-second retry cost three minutes."""
     from seedmesh.cli.main import CHAT_REQUEST_TIMEOUT
 
-    assert CHAT_REQUEST_TIMEOUT == 180, "must match petals ClientConfig.request_timeout"
+    assert CHAT_REQUEST_TIMEOUT <= 60, "a long timeout cannot rescue a stall, only prolong it"
+    assert CHAT_REQUEST_TIMEOUT >= 5, "must still clear the 3.93s slowest healthy request"
     assert parser.parse_args(["chat"]).timeout == CHAT_REQUEST_TIMEOUT
+
+
+# ---- retry with a fresh session ---------------------------------------------
+#
+# Measured: ~1 request in 3 stalls on a relayed swarm and never recovers, but a fresh
+# attempt succeeded 14/14 immediately. Retrying is the recovery mechanism, which is why the
+# timeout is short rather than generous.
+
+
+def test_retry_returns_the_first_success():
+    from seedmesh.cli.main import generate_with_retry
+
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) < 3:
+            raise TimeoutError("stalled")
+        return "answer"
+
+    assert generate_with_retry(flaky, attempts=4) == "answer"
+    assert len(calls) == 3, "must stop as soon as one attempt works"
+
+
+def test_retry_gives_up_and_reraises_the_last_error():
+    from seedmesh.cli.main import generate_with_retry
+
+    def always_stalls():
+        raise TimeoutError("stalled")
+
+    with pytest.raises(TimeoutError):
+        generate_with_retry(always_stalls, attempts=3)
+
+
+def test_retry_reports_each_stall_so_a_slow_answer_is_not_silent():
+    from seedmesh.cli.main import generate_with_retry
+
+    seen = []
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) < 2:
+            raise TimeoutError("stalled")
+        return "ok"
+
+    generate_with_retry(flaky, attempts=3, on_retry=lambda n, exc: seen.append(n))
+    assert seen == [1], "the user should see why a response took longer than usual"
+
+
+def test_a_single_attempt_still_works():
+    from seedmesh.cli.main import generate_with_retry
+
+    assert generate_with_retry(lambda: "x", attempts=1) == "x"
+
+
+def test_chat_disables_the_petals_internal_retry_path(parser):
+    """Petals' own retry reuses the session and rebuilds only the failed span -- the path
+    that raises AssertionError('0 and N'). A fresh session has no position to disagree
+    about, so recovery belongs above Petals, not inside it."""
+    import inspect
+
+    from seedmesh.cli import main as main_module
+
+    source = inspect.getsource(main_module._cmd_chat)
+    assert "max_retries=1" in source, "internal retry must stay off; it triggers the bug"
+    assert "generate_with_retry" in source
