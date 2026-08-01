@@ -1,0 +1,66 @@
+{
+  "notes": "spike/quantization, NVIDIA GeForce RTX 3050 Laptop GPU, 60 samples/pair. QUANTIZATION component only -- single GPU, so the hardware-diversity component of honest disagreement is NOT included. Re-fit before production use.",
+  "tolerances": {
+    "int8/fp16/eager|int8/fp16/eager": {
+      "cosine_distance": 0.0001,
+      "match_distance": 0.0001,
+      "mismatch_distance": 0.0006000000000000001,
+      "norm_deviation": 0.0001
+    },
+    "int8/fp16/eager|nf4/fp16/eager": {
+      "cosine_distance": 0.0007000890879188265,
+      "match_distance": 0.07000890879188265,
+      "mismatch_distance": 0.4200534527512959,
+      "norm_deviation": 0.007000890879188266
+    },
+    "int8/fp16/eager|none/bf16/eager": {
+      "cosine_distance": 0.0001,
+      "match_distance": 0.007702996226914463,
+      "mismatch_distance": 0.04621797736148678,
+      "norm_deviation": 0.0007702996226914463
+    },
+    "int8/fp16/eager|none/fp16/eager": {
+      "cosine_distance": 0.0001,
+      "match_distance": 0.006516412029539365,
+      "mismatch_distance": 0.03909847217723619,
+      "norm_deviation": 0.0006516412029539365
+    },
+    "nf4/fp16/eager|nf4/fp16/eager": {
+      "cosine_distance": 0.0001,
+      "match_distance": 0.0001,
+      "mismatch_distance": 0.0006000000000000001,
+      "norm_deviation": 0.0001
+    },
+    "nf4/fp16/eager|none/bf16/eager": {
+      "cosine_distance": 0.0006981978157140919,
+      "match_distance": 0.06981978157140918,
+      "mismatch_distance": 0.4189186894284551,
+      "norm_deviation": 0.006981978157140919
+    },
+    "nf4/fp16/eager|none/fp16/eager": {
+      "cosine_distance": 0.0006935384097029494,
+      "match_distance": 0.06935384097029493,
+      "mismatch_distance": 0.41612304582176957,
+      "norm_deviation": 0.006935384097029494
+    },
+    "none/bf16/eager|none/bf16/eager": {
+      "cosine_distance": 0.0001,
+      "match_distance": 0.0001,
+      "mismatch_distance": 0.0006000000000000001,
+      "norm_deviation": 0.0001
+    },
+    "none/bf16/eager|none/fp16/eager": {
+      "cosine_distance": 0.0001,
+      "match_distance": 0.004351063460156188,
+      "mismatch_distance": 0.026106380760937128,
+      "norm_deviation": 0.00043510634601561876
+    },
+    "none/fp16/eager|none/fp16/eager": {
+      "cosine_distance": 0.0001,
+      "match_distance": 0.0001,
+      "mismatch_distance": 0.0006000000000000001,
+      "norm_deviation": 0.0001
+    }
+  },
+  "version": 1
+}

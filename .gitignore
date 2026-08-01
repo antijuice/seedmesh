@@ -1,0 +1,33 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+.venv/
+venv/
+env/
+# Throwaway spike environments; rebuild from the READMEs in spike/*/.
+.venv-spike/
+.venv-quant/
+
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Simulation artifacts are reproducible from seeds; don't commit them.
+runs/
+*.sim.json
+
+# Calibration session files are measurements, not artifacts -- but they are large and
+# machine-specific. Commit the fitted tolerance_table.json (with its provenance notes),
+# not the raw sessions.
+sessions/session_*.json
+sessions/smoke.json
+
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,76 @@
+# Launch model catalog.
+#
+# NOTHING HERE IS WIRED UP YET. No backend adapter exists, so these entries are a planning
+# artifact, not a working catalog. They are recorded now because the licensing decision
+# should be made deliberately and in the open (spec section 9), not defaulted into during a
+# rushed launch.
+#
+# Two constraints drive every choice below.
+#
+# LICENSING. A permissionless swarm serving inference to anonymous strangers is not the
+# deployment shape these licenses were written for. Llama's Community License is
+# incorporated-by-reference with an acceptable-use policy, is non-transferable, and requires
+# passing license text to anyone you "distribute" the model or its outputs to -- genuinely
+# untested territory for a P2P network. Lead with unambiguously permissive licenses instead.
+# Check the license at launch time; they change release to release.
+#
+# TRANSFORMERS VERSION. The Petals backend pins transformers==4.43.1 and subclasses
+# internals the 4.48+ attention refactor rewrote. Every model needing a newer transformers
+# is blocked behind that port. See docs/findings-upstream-audit.md.
+
+version: 1
+
+defaults:
+  quantization: int8
+  min_vram_gb_per_block: 0.5   # placeholder; must be measured per model, not guessed
+
+models:
+  - id: qwen3-8b
+    role: general-chat
+    status: candidate
+    license: apache-2.0
+    license_verified: false      # confirm against the model card before launch
+    min_transformers: "4.51"
+    blocked_by: petals-transformers-port
+    notes: >
+      Preferred flagship candidate. Permissive license avoids the whole class of problems
+      Llama-family licensing creates for a public swarm. Needs the transformers port.
+
+  - id: qwen2.5-7b-instruct
+    role: general-chat
+    status: candidate
+    license: apache-2.0
+    license_verified: false
+    min_transformers: "4.43"
+    blocked_by: null
+    notes: >
+      The pragmatic launch option: permissive AND within the transformers pin, so it works
+      on an unported Petals fork. Worth leading with if the port slips -- an older
+      permissive model beats a newer one nobody can host.
+
+  - id: qwen2.5-coder-7b
+    role: code
+    status: candidate
+    license: apache-2.0
+    license_verified: false
+    min_transformers: "4.43"
+    blocked_by: null
+
+  - id: small-fast-tbd
+    role: low-end-hardware
+    status: unresolved
+    license: null
+    notes: >
+      Deliberately unfilled. The point of this slot is contributors with 4-8GB cards, and
+      picking it needs real memory measurements per block rather than a guess. Check
+      r/LocalLLaMA sentiment near launch; this shifts monthly.
+
+# Explicitly NOT default network citizens without a real license read:
+#   - Any Llama-family model (Community License, incorporated AUP, non-transferable)
+#   - Any gated or click-through-licensed model
+#   - DeepSeek-V3/R1 (also needs custom MLA + MoE block implementations -- not just config)
+excluded:
+  - id: llama-3.1-8b
+    reason: community-license-untested-for-p2p-redistribution
+  - id: deepseek-v3
+    reason: requires-custom-block-implementation-and-license-review

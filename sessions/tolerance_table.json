@@ -1,0 +1,66 @@
+{
+  "notes": "fitted from 1 session(s) across 1 GPU type(s): ['NVIDIA GeForce RTX 3050 Laptop GPU']; model=JackFram/llama-160m block=0; target FPR=0.001, mismatch multiplier=6.0",
+  "tolerances": {
+    "int8/float16/eager|nf4/float16/eager": {
+      "cosine_distance": 0.0004665154349093231,
+      "match_distance": 0.04665154349093231,
+      "mismatch_distance": 0.2799092609455939,
+      "norm_deviation": 0.00466515434909323
+    },
+    "int8/float16/eager|none/bfloat16/eager": {
+      "cosine_distance": 0.0001,
+      "match_distance": 0.007759302592648497,
+      "mismatch_distance": 0.046555815555890986,
+      "norm_deviation": 0.0007759302592648497
+    },
+    "int8/float16/eager|none/float16/eager": {
+      "cosine_distance": 0.0001,
+      "match_distance": 0.007198933901050326,
+      "mismatch_distance": 0.043193603406301954,
+      "norm_deviation": 0.0007198933901050326
+    },
+    "int8/float16/eager|none/float32/eager": {
+      "cosine_distance": 0.0001,
+      "match_distance": 0.007139972571946195,
+      "mismatch_distance": 0.04283983543167717,
+      "norm_deviation": 0.0007139972571946195
+    },
+    "nf4/float16/eager|none/bfloat16/eager": {
+      "cosine_distance": 0.00044350905200652644,
+      "match_distance": 0.04435090520065264,
+      "mismatch_distance": 0.26610543120391583,
+      "norm_deviation": 0.004435090520065264
+    },
+    "nf4/float16/eager|none/float16/eager": {
+      "cosine_distance": 0.00044953081150207795,
+      "match_distance": 0.044953081150207796,
+      "mismatch_distance": 0.2697184869012468,
+      "norm_deviation": 0.004495308115020779
+    },
+    "nf4/float16/eager|none/float32/eager": {
+      "cosine_distance": 0.000449708649145952,
+      "match_distance": 0.0449708649145952,
+      "mismatch_distance": 0.26982518948757117,
+      "norm_deviation": 0.00449708649145952
+    },
+    "none/bfloat16/eager|none/float16/eager": {
+      "cosine_distance": 0.0001,
+      "match_distance": 0.0021871729881100164,
+      "mismatch_distance": 0.013123037928660097,
+      "norm_deviation": 0.00021871729881100166
+    },
+    "none/bfloat16/eager|none/float32/eager": {
+      "cosine_distance": 0.0001,
+      "match_distance": 0.0022282264986246054,
+      "mismatch_distance": 0.013369358991747633,
+      "norm_deviation": 0.00022282264986246055
+    },
+    "none/float16/eager|none/float32/eager": {
+      "cosine_distance": 0.0001,
+      "match_distance": 0.0002561261444413986,
+      "mismatch_distance": 0.0015367568666483915,
+      "norm_deviation": 0.0001
+    }
+  },
+  "version": 1
+}
