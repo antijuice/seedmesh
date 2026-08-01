@@ -16,6 +16,7 @@ backend at all.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 from typing import Optional, Sequence
@@ -120,8 +121,28 @@ def _cmd_probe(args: argparse.Namespace) -> int:
 # ---- serve ------------------------------------------------------------------
 
 
+def _refuse_on_windows(what: str) -> bool:
+    """The backend is Linux-only, and failing later is much less clear than failing here.
+
+    Without this the command shells out to a petals that was never installed (setup refuses
+    on Windows) and the volunteer gets a ModuleNotFoundError instead of the actual reason.
+    """
+    if sys.platform != "win32":
+        return False
+    print(f"{what} needs the Petals backend, which does not run natively on Windows.\n")
+    print("Use WSL2:")
+    print("    wsl --install -d Ubuntu          # once, then reopen a terminal")
+    print("    wsl                              # drop into Ubuntu")
+    print("  then clone the repo and run `seedmesh setup` *inside* Ubuntu.\n")
+    print("`seedmesh probe` and `seedmesh simulate` do run natively here.")
+    return True
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     """Wrap Petals' server with auto-sizing and friendlier defaults."""
+    if _refuse_on_windows("Hosting blocks"):
+        return 2
+
     from seedmesh.cli.hardware import (
         UnsupportedModelError,
         check_model_supported,
@@ -271,14 +292,71 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
 
     command += args.passthrough
 
-    print(f"$ {' '.join(command)}\n")
+    print(f"$ {' '.join(command)}\n", flush=True)
+
+    # Unbuffered on both sides. Reading the child through a pipe makes *both* stdouts
+    # block-buffered when they are not a terminal -- under systemd that means journalctl
+    # shows nothing for minutes and the address never appears when you need it.
+    import os
+
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     try:
-        return subprocess.call(command)
-    except KeyboardInterrupt:
-        return 0
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, env=env,
+        )
     except FileNotFoundError:
-        print("Could not launch the DHT node. Run `seedmesh setup` first.")
+        print("Could not launch the DHT node. Run `seedmesh setup` first.", flush=True)
         return 2
+
+    # Echo the daemon's output, and the first time a peer id appears, print the commands a
+    # friend should actually run. hivemind prints its own `--initial_peers` line, and that
+    # underscore spelling does not match this CLI -- copying what is on screen produced
+    # "unrecognized arguments: --initial_peers". Printing the real thing beats aliasing it.
+    announced = False
+    try:
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            if announced:
+                continue
+            match = re.search(r"/p2p/([A-Za-z0-9]+)", line)
+            if match:
+                announced = True
+                _print_join_instructions(args, match.group(1))
+        return process.wait()
+    except KeyboardInterrupt:
+        process.terminate()
+        return 0
+
+
+def _print_join_instructions(args: argparse.Namespace, peer_id: str) -> None:
+    if args.announce_ip:
+        address = f"{_announce_maddr(args.announce_ip, args.port)}/p2p/{peer_id}"
+    else:
+        address = f"/ip4/<this machine's public IP>/tcp/{args.port}/p2p/{peer_id}"
+
+    # One line per command, deliberately: a backslash-continued command breaks the moment
+    # someone's terminal or chat client reflows it, and these get pasted through both.
+    rule = "=" * 78
+    banner = f"""
+{rule}
+BOOTSTRAP READY -- send your friends the commands below, verbatim.
+On Windows they must run these inside WSL2; the backend is Linux-only.
+
+Bootstrap address:
+  {address}
+
+To donate compute (host blocks):
+  seedmesh serve --model {DEFAULT_MODEL} --initial-peers {address} --public-name "their-name"
+
+To use the swarm (send prompts):
+  seedmesh chat --model {DEFAULT_MODEL} --initial-peers {address}
+
+Everyone must use the SAME --model string -- it sets the DHT prefix, so a mismatch
+puts people in separate swarms with no error message.
+{rule}
+"""
+    print(banner, flush=True)
 
 
 # ---- chat -------------------------------------------------------------------
@@ -307,8 +385,42 @@ def _quiet_hivemind_finalizers() -> None:
     sys.unraisablehook = hook
 
 
+def explain_inference_failure(exc: BaseException) -> str:
+    """Turn a routing failure into something a volunteer can act on.
+
+    Measured 2026-08-01 on a real two-host swarm: a laptop server behind NAT announced its
+    blocks and showed ONLINE in the DHT, but clients got
+    `P2PDaemonError('routing: not found')` for several minutes afterwards. Block records and
+    libp2p peer-routing records propagate independently, so there is a window where the
+    swarm advertises a server nobody can dial yet. The same query succeeded ~5 minutes
+    later with no changes. Retrying is genuinely the fix, so say so instead of unwinding a
+    60-frame traceback that looks like a crash.
+    """
+    detail = str(exc)
+    if "routing: not found" in detail or "no route" in detail.lower():
+        return (
+            "\nFound a server in the DHT, but could not open a connection to it yet.\n"
+            "  This is usually normal and usually temporary. A server's block records\n"
+            "  appear in the DHT before its address does, so there is a window -- a few\n"
+            "  minutes after it starts -- where it looks available but cannot be dialled.\n"
+            "  Wait a minute and send the prompt again.\n"
+            "  If it persists past ~10 minutes, the server is behind NAT and no relay path\n"
+            "  formed; see docs/NAT-AND-RELAYS.md.\n"
+        )
+    if "no servers" in detail.lower() or "not enough" in detail.lower():
+        return (
+            "\nNo server covers part of this model.\n"
+            "  Every block must be hosted by someone online. Check `seedmesh serve` is\n"
+            "  running somewhere, on the SAME --model string.\n"
+        )
+    return f"\ninference failed: {type(exc).__name__}: {detail}\n"
+
+
 def _cmd_chat(args: argparse.Namespace) -> int:
     """Minimal interactive client against a swarm."""
+    if _refuse_on_windows("Talking to a swarm"):
+        return 2
+
     try:
         import torch
         from hivemind.dht import DHT
@@ -347,8 +459,14 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             if not prompt:
                 continue
             inputs = tokenizer(prompt, return_tensors="pt")["input_ids"]
-            with torch.inference_mode():
-                outputs = model.generate(inputs, max_new_tokens=args.max_new_tokens, do_sample=False)
+            try:
+                with torch.inference_mode():
+                    outputs = model.generate(
+                        inputs, max_new_tokens=args.max_new_tokens, do_sample=False
+                    )
+            except Exception as exc:
+                print(explain_inference_failure(exc))
+                continue
             print(tokenizer.decode(outputs[0], skip_special_tokens=True) + "\n")
     except KeyboardInterrupt:
         print()
@@ -358,6 +476,10 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
 
 # ---- parser -----------------------------------------------------------------
+#
+# Every multi-word flag also accepts its underscore spelling. Petals and hivemind print
+# their own flag names in log output -- run_dht literally says "use --initial_peers ..." --
+# so copying what is on screen otherwise hits "unrecognized arguments".
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -366,11 +488,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     setup = subparsers.add_parser("setup", help="install and patch the Petals backend")
-    setup.add_argument("--petals-dir", default=None)
-    setup.add_argument("--skip-install", action="store_true")
+    setup.add_argument("--petals-dir", "--petals_dir", default=None)
+    setup.add_argument("--skip-install", "--skip_install", action="store_true")
     setup.add_argument("--force", action="store_true", help="continue despite platform warnings")
     setup.add_argument(
-        "--cpu-torch",
+        "--cpu-torch", "--cpu_torch",
         action="store_true",
         help="install CPU-only torch even if a GPU is present (default: auto-detect)",
     )
@@ -381,12 +503,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     serve = subparsers.add_parser("serve", help="host blocks for a swarm")
     serve.add_argument("--model", default=DEFAULT_MODEL)
-    serve.add_argument("--num-blocks", type=int, default=None, help="default: auto-size")
+    serve.add_argument("--num-blocks", "--num_blocks", type=int, default=None,
+                       help="default: auto-size")
     serve.add_argument("--quant", choices=["none", "int8", "nf4"], default="nf4")
-    serve.add_argument("--initial-peers", nargs="+", default=None)
+    serve.add_argument("--initial-peers", "--initial_peers", nargs="+", default=None)
     serve.add_argument("--device", default=None)
-    serve.add_argument("--public-name", default=None, help="shown on the leaderboard")
-    serve.add_argument("--host-maddrs", nargs="+", default=None)
+    serve.add_argument("--public-name", "--public_name", default=None,
+                       help="shown on the leaderboard")
+    serve.add_argument("--host-maddrs", "--host_maddrs", nargs="+", default=None)
     serve.add_argument(
         "passthrough",
         nargs="*",
@@ -405,21 +529,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bootstrap.add_argument("--port", type=int, default=31337)
     bootstrap.add_argument(
-        "--announce-ip",
+        "--announce-ip", "--announce_ip",
         default=None,
         help="the machine's PUBLIC IPv4 -- what it tells other peers to dial. A VPS "
              "usually only sees its private address, so without this nobody can reach it.",
     )
     bootstrap.add_argument(
-        "--initial-peers", nargs="+", default=None,
+        "--initial-peers", "--initial_peers", nargs="+", default=None,
         help="join an existing DHT (for running a second bootstrap); omit to start a new one",
     )
     bootstrap.add_argument(
-        "--identity-path",
+        "--identity-path", "--identity_path",
         default=str(Path.home() / ".seedmesh" / "bootstrap.key"),
         help="keeps the peer id stable across restarts; losing it changes the address",
     )
-    bootstrap.add_argument("--host-maddrs", nargs="+", default=None, help="advanced; overrides --port")
+    bootstrap.add_argument("--host-maddrs", "--host_maddrs", nargs="+", default=None,
+                           help="advanced; overrides --port")
     bootstrap.add_argument(
         "passthrough", nargs="*", metavar="-- DHT_ARGS",
         help="anything after a bare '--' goes to petals.cli.run_dht verbatim",
@@ -427,17 +552,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     chat = subparsers.add_parser("chat", help="talk to a swarm")
     chat.add_argument("--model", default=DEFAULT_MODEL)
-    chat.add_argument("--initial-peers", nargs="+", default=None)
-    chat.add_argument("--max-new-tokens", type=int, default=32)
+    chat.add_argument("--initial-peers", "--initial_peers", nargs="+", default=None)
+    chat.add_argument("--max-new-tokens", "--max_new_tokens", type=int, default=32)
     chat.add_argument("--timeout", type=float, default=60.0)
 
     simulate = subparsers.add_parser(
         "simulate", help="run trust-layer scenarios against the swarm simulator"
     )
-    simulate.add_argument("--scenario", choices=["healthy", "threats", "sybil", "all"], default="all")
+    simulate.add_argument(
+        "--scenario", choices=["healthy", "threats", "sybil", "all"], default="all"
+    )
     simulate.add_argument("--requests", type=int, default=400)
     simulate.add_argument("--seed", type=int, default=7)
-    simulate.add_argument("--calibration-samples", type=int, default=150)
+    simulate.add_argument("--calibration-samples", "--calibration_samples",
+                          type=int, default=150)
 
     return parser
 

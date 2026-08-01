@@ -22,12 +22,15 @@ Seedmesh builds the missing half.
 > **Status: pre-alpha. There is no public swarm.** The trust layer is built and tested, and
 > a *private* swarm now runs real inference through it end to end — discovery, routing,
 > per-server execution, and sampler-driven verification — see
-> [docs/petals-port.md](docs/petals-port.md). What that does not mean: no public network
-> exists, and inference has only run on CPU at toy model size on a single host. Verification
-> thresholds are measured across five real GPU architectures, and network clustering uses a
-> real offline ASN table — but a single-host swarm has no routable addresses, so ASN
-> separation itself is still only exercised against a simulated mapping. Said plainly because
-> this project's pitch is trust, and overstating readiness is a bad way to start.
+> [docs/petals-port.md](docs/petals-port.md). As of 2026-08-01 that swarm spans **two real
+> hosts on the public internet** — a VPS bootstrap peer and a laptop behind home NAT — with
+> a client routing to the NAT'd server and getting coherent tokens back.
+>
+> What that does not mean: no public network exists; inference has run only on CPU, at 160M
+> parameters, with one server. Verification thresholds are measured across five real GPU
+> architectures and network clustering uses a real offline ASN table, but cross-host
+> verification distances have not been measured. Said plainly because this project's pitch
+> is trust, and overstating readiness is a bad way to start.
 
 ---
 

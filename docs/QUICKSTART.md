@@ -141,6 +141,13 @@ failure is more likely a real network problem than a bad model name.
 **Connected, but the swarm looks empty** — check every peer is using the *identical* model
 string. It sets the DHT prefix, so a mismatch puts people in separate swarms with no error.
 
+**`routing: not found` right after someone starts serving** — normal, and temporary. A
+server's *block* records reach the DHT before its *peer routing* record does, so for a few
+minutes the swarm advertises a server nobody can dial yet. Measured on a real two-host
+swarm: a NAT'd laptop showed `ONLINE` with all 12 blocks and was unreachable at one attempt,
+then served the identical query ~5 minutes later with nothing changed. Wait and retry. If it
+persists past ~10 minutes, see [NAT-AND-RELAYS.md](NAT-AND-RELAYS.md).
+
 **`No GPU detected and --num-blocks not given`** — `probe` found no CUDA device. You can
 still use a swarm as a client.
 
@@ -157,9 +164,11 @@ Being explicit, so nothing here surprises you:
 - **No public swarm exists.** Private swarms only.
 - **Verification does not run automatically during inference.** It works, and is driven in
   `tools/backend_demo.py`, but a serving client does not yet sample its own requests inline.
-- **Multi-host has never been tested.** Everything so far ran on one machine, so NAT
-  traversal and relays are unexercised — the most likely thing to break first, and the main
-  reason to run this with friends.
+- **Multi-host now works, with caveats.** Verified 2026-08-01 across two real hosts on the
+  public internet: a VPS bootstrap peer and a laptop behind home NAT hosting all 12 blocks
+  of a 160M model, with a client routing to it and getting coherent tokens back. What is
+  still unproven: more than two hosts, more than one server, GPU inference, models above
+  160M, and cross-host verification distances.
 - **Only clients gossip reputation.** Servers observe nothing (they receive requests, they
   do not route them), so in a swarm where one person runs the client, there is only one
   observer and nothing to exchange. Two or more people using the swarm is what makes

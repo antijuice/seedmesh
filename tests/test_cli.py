@@ -198,13 +198,59 @@ def test_bootstrap_needs_no_model(parser):
     assert not hasattr(args, "model")
 
 
-def test_serve_with_zero_blocks_refuses_and_points_at_bootstrap(parser, capsys):
-    from seedmesh.cli.main import _cmd_serve
+def test_serve_with_zero_blocks_refuses_and_points_at_bootstrap(parser, capsys, monkeypatch):
+    from seedmesh.cli import main as main_module
+
+    # The Windows guard would otherwise short-circuit this on the dev machine; the
+    # zero-block refusal is platform-independent, so the test should be too.
+    monkeypatch.setattr(main_module, "_refuse_on_windows", lambda what: False)
+    monkeypatch.setattr(main_module, "_cmd_serve", main_module._cmd_serve)
 
     args = parser.parse_args(["serve", "--model", "JackFram/llama-160m", "--num-blocks", "0"])
-    assert _cmd_serve(args) == 2
+    assert main_module._cmd_serve(args) == 2
     out = capsys.readouterr().out
     assert "seedmesh bootstrap" in out, "refusing without naming the fix is not useful"
+
+
+def test_serve_on_windows_names_wsl_rather_than_failing_obscurely(parser, capsys, monkeypatch):
+    """Without this, `serve` shells out to a petals that setup refused to install on
+    Windows, and the volunteer sees ModuleNotFoundError instead of the reason."""
+    from seedmesh.cli import main as main_module
+
+    monkeypatch.setattr(main_module.sys, "platform", "win32")
+    args = parser.parse_args(["serve", "--model", "JackFram/llama-160m", "--num-blocks", "4"])
+    assert main_module._cmd_serve(args) == 2
+    out = capsys.readouterr().out
+    assert "WSL2" in out and "wsl --install" in out
+
+
+def test_underscore_flag_spellings_are_accepted(parser):
+    """hivemind's own output says `--initial_peers`, and that is what gets copied. The
+    hyphenated form is canonical; the underscore form must not be an error wall."""
+    args = parser.parse_args([
+        "serve", "--model", "m", "--initial_peers", "/ip4/1.2.3.4/tcp/1/p2p/Qm",
+        "--public_name", "hewitt", "--num_blocks", "4",
+    ])
+    assert args.initial_peers == ["/ip4/1.2.3.4/tcp/1/p2p/Qm"]
+    assert args.public_name == "hewitt" and args.num_blocks == 4
+
+    chat = parser.parse_args(["chat", "--initial_peers", "/ip4/1.2.3.4/tcp/1/p2p/Qm"])
+    assert chat.initial_peers == ["/ip4/1.2.3.4/tcp/1/p2p/Qm"]
+
+
+def test_bootstrap_prints_pasteable_commands(capsys):
+    """The bootstrap operator should not have to hand-translate hivemind's output."""
+    from seedmesh.cli.main import _print_join_instructions, build_parser
+
+    args = build_parser().parse_args(["bootstrap", "--announce-ip", "159.89.52.179"])
+    _print_join_instructions(args, "QmTG981oPjsPFX5WWNegdXmkiNUgWqjUvK9spieg4hSi1h")
+    out = capsys.readouterr().out
+
+    address = "/ip4/159.89.52.179/tcp/31337/p2p/QmTG981oPjsPFX5WWNegdXmkiNUgWqjUvK9spieg4hSi1h"
+    assert address in out
+    assert "seedmesh serve" in out and "seedmesh chat" in out
+    assert "--initial-peers" in out, "must print the spelling this CLI actually accepts"
+    assert "--initial_peers" not in out
 
 
 # ---- announce address validation --------------------------------------------
@@ -267,3 +313,36 @@ def test_hivemind_finalizer_noise_is_suppressed_but_other_errors_are_not():
         assert len(seen) == 1, "a genuine unraisable error must still surface"
     finally:
         sys.unraisablehook = original
+
+
+# ---- routing failures -------------------------------------------------------
+#
+# Measured on a real two-host swarm: a NAT'd laptop server showed ONLINE in the DHT with
+# all 12 blocks, but clients got P2PDaemonError('routing: not found') for several minutes.
+# The identical query then succeeded with no changes. Block records and libp2p peer-routing
+# records propagate independently, so "advertised but not yet dialable" is a normal state.
+
+
+def test_routing_failure_says_to_retry_rather_than_looking_like_a_crash():
+    from seedmesh.cli.main import explain_inference_failure
+
+    message = explain_inference_failure(RuntimeError("routing: not found"))
+    assert "temporary" in message.lower()
+    assert "again" in message.lower(), "must tell the user the actual remedy"
+    assert "NAT-AND-RELAYS" in message, "and where to go if it is not temporary"
+
+
+def test_missing_coverage_is_distinguished_from_a_routing_failure():
+    """Different cause, different fix: nobody is serving vs. cannot reach who is."""
+    from seedmesh.cli.main import explain_inference_failure
+
+    message = explain_inference_failure(RuntimeError("No servers found for block 7"))
+    assert "seedmesh serve" in message
+    assert "--model" in message, "a model-string mismatch is the usual reason"
+
+
+def test_an_unrecognised_error_is_reported_verbatim_not_swallowed():
+    from seedmesh.cli.main import explain_inference_failure
+
+    message = explain_inference_failure(ValueError("something else entirely"))
+    assert "ValueError" in message and "something else entirely" in message
