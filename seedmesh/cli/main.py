@@ -281,7 +281,11 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
 
     host_maddrs = args.host_maddrs or [f"/ip4/0.0.0.0/tcp/{args.port}"]
 
-    command = [sys.executable, "-m", "petals.cli.run_dht", "--host_maddrs", *host_maddrs]
+    # Not petals.cli.run_dht directly: the shim raises the circuit-relay data budget from
+    # go-libp2p's 128 KiB default before starting the same DHT node. See bootstrap_dht.py --
+    # that default silently resets a relayed connection mid-request, and the relay is the
+    # only party that can grant a bigger one.
+    command = [sys.executable, "-m", "seedmesh.cli.bootstrap_dht", "--host_maddrs", *host_maddrs]
 
     if args.announce_ip:
         try:

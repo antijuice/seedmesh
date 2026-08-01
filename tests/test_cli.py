@@ -425,3 +425,60 @@ def test_chat_disables_the_petals_internal_retry_path(parser):
     source = inspect.getsource(main_module._cmd_chat)
     assert "max_retries=1" in source, "internal retry must stay off; it triggers the bug"
     assert "generate_with_retry" in source
+
+
+# ---- relay data budget -------------------------------------------------------
+#
+# Root cause of the every-Nth-request stall, found 2026-08-01. go-libp2p's circuit-relay-v2
+# resets a relayed connection after ~128 KiB per direction (DefaultResources) and nothing
+# above it notices, so the in-flight request hangs until the client's timeout. Confirmed by
+# prediction: the stall period tracks bytes/request, not request count.
+#
+#   ~24 KB/request  -> stall every 6.0    (predicted 5.3)
+#   ~45 KB/request  -> stall every 3.0    (predicted 2.8)
+#  ~117 KB/request  -> every request      (predicted 1.1)
+#
+# p2pd accepts -relayDataLimit/-relayTimeLimit but hivemind builds its argv from a fixed
+# keyword set, so the shim wraps _make_process_args to inject them.
+
+
+def test_relay_budget_flags_reach_the_daemon_argv(monkeypatch):
+    hivemind_p2p = pytest.importorskip(
+        "hivemind.p2p.p2p_daemon", reason="hivemind does not run natively on Windows"
+    )
+    from seedmesh.cli.bootstrap_dht import RELAY_DATA_LIMIT, raise_relay_budget
+
+    original = hivemind_p2p.P2P._make_process_args
+    monkeypatch.setattr(hivemind_p2p.P2P, "_make_process_args", original)
+
+    raise_relay_budget()
+    argv = hivemind_p2p.P2P._make_process_args("p2pd", relay=1)
+
+    assert f"-relayDataLimit={RELAY_DATA_LIMIT}" in argv
+    assert any(arg.startswith("-relayTimeLimit=") for arg in argv)
+    assert "-relayService=1" in argv
+
+
+def test_relay_budget_does_not_override_an_explicit_value(monkeypatch):
+    hivemind_p2p = pytest.importorskip(
+        "hivemind.p2p.p2p_daemon", reason="hivemind does not run natively on Windows"
+    )
+    from seedmesh.cli.bootstrap_dht import raise_relay_budget
+
+    original = hivemind_p2p.P2P._make_process_args
+    monkeypatch.setattr(hivemind_p2p.P2P, "_make_process_args", original)
+
+    raise_relay_budget()
+    argv = hivemind_p2p.P2P._make_process_args("p2pd", relayDataLimit=999)
+    assert "-relayDataLimit=999" in argv
+
+
+def test_bootstrap_launches_the_shim_not_run_dht_directly():
+    """Going straight to petals.cli.run_dht would leave the relay on the 128 KiB default,
+    and the relay is the only party that can grant a bigger budget."""
+    import inspect
+
+    from seedmesh.cli import main as main_module
+
+    source = inspect.getsource(main_module._cmd_bootstrap)
+    assert "seedmesh.cli.bootstrap_dht" in source

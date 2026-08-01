@@ -102,3 +102,96 @@ Petals' `check_direct_reachability` will then succeed, the server runs as a full
 of `client_mode`, and none of the above applies — no relay, no stalls. Relaying is the
 fallback for volunteers who cannot change their router, and it should be described to them as
 "works, intermittently" rather than "works".
+
+## Located: the stall is on the relay return path, every 3rd request
+
+Investigated 2026-08-01 with logs on both ends (own server behind the same NAT, own client,
+separate `--dht_prefix` so the live swarm was untouched).
+
+**The request arrives and the server answers it. The response is lost.** Matching client
+stalls against the server's own `rpc_inference` log:
+
+```
+client trial 2   STALL 8.62s
+server           15:40:01.981 open  ->  15:40:02.563 close   (0.58s, clean)
+```
+
+`opens=19 closes=19` across the run — every request, including the stalled ones, reached the
+server and was completed and closed normally in about half a second. The client simply never
+received the answer.
+
+### What it is invariant to
+
+Each of these was measured, and none of them changes the pattern `..X..X..X..X`:
+
+| varied | result |
+| --- | --- |
+| prompt content and length (2–16 tokens) | no effect |
+| timeout (8s vs 60s) | no effect — stalls hit whatever wall is set, never recover |
+| spacing between requests (0s vs 6s) | **identical pattern** — not a cleanup or timing effect |
+| reusing one session vs a fresh one per prompt | still every 3rd request |
+| **direct connection instead of a relay** | **0 stalls in 30** |
+
+So: relay-only, strictly every 3rd request, on the return path. Not a configured limit —
+p2pd's relevant defaults are `connHi 512`, `relayMaxCircuits 16`, `relayDataLimit 4 GB`,
+`relayTimeLimit 30m`, none of which is 3.
+
+### Located: go-libp2p's 128 KiB circuit-relay budget
+
+With `GOLOG_LOG_LEVEL` raised on both daemons, the relayed connection turns out to be
+**silently discarded and re-dialled**, three requests apart:
+
+```
+16:04:02.865 rpc_inference.close   (trial 3, OK)
+16:04:03.653 rpc_inference.close   (trial 4, OK)
+16:04:04.262 rpc_inference.close   (trial 5, STALLED -- server still completed it)
+16:04:12.292 swarm dialing ... /p2p-circuit    <- brand-new circuit, after the timeout
+```
+
+No close, no reset, no resource-manager message. go-libp2p's circuit-relay-v2
+`DefaultResources()` caps a relayed connection at **128 KiB per direction** and resets it
+when the budget runs out; nothing above the transport is told, so the in-flight request just
+never gets an answer.
+
+That predicts the stall period should track *bytes*, not requests. For llama-160m (hidden
+768, fp32 = 3072 bytes/token), bytes/request = (prompt + new tokens) × 3072:
+
+| `max_new_tokens` | KB/request | predicted period | **measured** |
+| --- | --- | --- | --- |
+| 1 | 24 | 5.3 | **6.0** |
+| 8 | 45 | 2.8 | **3.0** |
+| 32 | 117 | 1.1 | **1.0 (15/15 stalled)** |
+
+Back-solving from all three gives ~130–145 KB, i.e. 128 KiB plus framing. Confirmed.
+
+### Why this is worse than it looks, and the fix
+
+Bytes/request scales with hidden size and dtype. **Llama-3.1-8B is hidden 4096 at bf16 =
+8192 bytes/token**, so one 30-token request moves ~245 KB — past the budget *within a single
+request*, every request, where retrying cannot help. Relayed hosting of a real model is
+impossible on the default budget, not merely flaky.
+
+A 128 KiB budget is sized for bootstrapping a direct connection via hole punching, and
+**p2pd exposes no hole-punching (DCUtR) flag** — so relayed connections stay relayed forever
+and never escape the budget.
+
+The relay grants the budget in its reservation, so the **bootstrap peer** is the one machine
+that can fix it for everybody. p2pd accepts `-relayDataLimit` and `-relayTimeLimit` (it
+documents defaults of 4 GiB and 30m, which are evidently not what the relay service ends up
+using), but hivemind builds its p2pd argv from a fixed keyword set with no passthrough.
+`seedmesh/cli/bootstrap_dht.py` wraps `P2P._make_process_args` to inject them, and
+`seedmesh bootstrap` runs that shim instead of `petals.cli.run_dht` directly.
+
+**Whoever runs the bootstrap must restart it on this version.** Volunteers change nothing;
+raising the relay's budget fixes every NAT'd peer at once, without anyone touching a router.
+
+### Why the mitigation is the right shape anyway
+
+Because the server completes the work and only the reply is lost, a retry is cheap and
+correct rather than a papering-over: `seedmesh chat` uses a short timeout and retries with a
+fresh session (`generate_with_retry`). Measured 12/12 prompts answered.
+
+**Do not "fix" this by holding one session open across prompts.** It looks like the obvious
+optimisation and it is actively worse: once a stall lands inside a shared session, the
+session is permanently poisoned with `AssertionError: Broken input cache` and every later
+prompt in it fails. Measured 10/12 failures versus 4/12.
