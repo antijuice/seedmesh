@@ -20,7 +20,9 @@ def parser():
 def test_all_commands_are_registered(parser):
     actions = [a for a in parser._actions if a.dest == "command"]
     assert actions, "no subcommand group"
-    assert set(actions[0].choices) == {"setup", "probe", "serve", "chat", "simulate"}
+    assert set(actions[0].choices) == {
+        "setup", "probe", "serve", "bootstrap", "chat", "simulate",
+    }
 
 
 def test_a_command_is_required(parser):
@@ -173,3 +175,65 @@ def test_setup_cpu_torch_flag_overrides_a_present_gpu(parser, recorded_setup, mo
 def test_simulate_still_works_without_a_backend(parser):
     args = parser.parse_args(["simulate", "--scenario", "sybil", "--requests", "10"])
     assert args.scenario == "sybil" and args.requests == 10
+
+
+# ---- bootstrap --------------------------------------------------------------
+#
+# `serve --num-blocks 0` was documented as the way to run a bootstrap peer. It is not: with
+# no blocks, Petals builds a ModuleAnnouncerThread from an empty uid list and dies on
+# `module_uids[0]`. Critically it does that *after* ~1 minute of throughput measurement, so
+# it announces an address and looks healthy first -- which is how it survived a 30s test.
+
+
+def test_bootstrap_is_a_registered_command(parser):
+    args = parser.parse_args(["bootstrap"])
+    assert args.port == 31337
+    assert args.announce_ip is None
+    assert args.initial_peers is None
+
+
+def test_bootstrap_needs_no_model(parser):
+    """A DHT node relays discovery for any swarm; requiring --model would imply otherwise."""
+    args = parser.parse_args(["bootstrap", "--announce-ip", "203.0.113.10"])
+    assert not hasattr(args, "model")
+
+
+def test_serve_with_zero_blocks_refuses_and_points_at_bootstrap(parser, capsys):
+    from seedmesh.cli.main import _cmd_serve
+
+    args = parser.parse_args(["serve", "--model", "JackFram/llama-160m", "--num-blocks", "0"])
+    assert _cmd_serve(args) == 2
+    out = capsys.readouterr().out
+    assert "seedmesh bootstrap" in out, "refusing without naming the fix is not useful"
+
+
+# ---- announce address validation --------------------------------------------
+
+
+def test_placeholder_ip_is_rejected():
+    """The guide literally says YOUR_PUBLIC_IP, and that string gets pasted verbatim."""
+    from seedmesh.cli.main import _announce_maddr
+
+    with pytest.raises(ValueError, match="not an IP address"):
+        _announce_maddr("YOUR_PUBLIC_IP", 31337)
+
+
+def test_private_ip_is_rejected_with_a_reason():
+    """A VPS usually only sees its private address, so announcing it strands the swarm."""
+    from seedmesh.cli.main import _announce_maddr
+
+    for private in ("10.0.0.5", "192.168.1.20", "172.16.0.1", "127.0.0.1"):
+        with pytest.raises(ValueError, match="not a public address"):
+            _announce_maddr(private, 31337)
+
+
+def test_public_ipv4_builds_a_multiaddr():
+    from seedmesh.cli.main import _announce_maddr
+
+    assert _announce_maddr("159.89.52.179", 31337) == "/ip4/159.89.52.179/tcp/31337"
+
+
+def test_ipv6_uses_the_ip6_protocol_token():
+    from seedmesh.cli.main import _announce_maddr
+
+    assert _announce_maddr("2606:4700:4700::1111", 31337) == "/ip6/2606:4700:4700::1111/tcp/31337"

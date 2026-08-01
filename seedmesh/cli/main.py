@@ -1,12 +1,13 @@
 """``seedmesh`` command line.
 
-Four commands, aimed at the two things a volunteer actually does -- find out what they can
+Five commands, aimed at the two things a volunteer actually does -- find out what they can
 contribute, and contribute it:
 
-    seedmesh setup     install and patch the Petals backend
-    seedmesh probe     what can this machine host?
-    seedmesh serve     host blocks for a swarm
-    seedmesh chat      talk to a swarm
+    seedmesh setup      install and patch the Petals backend
+    seedmesh probe      what can this machine host?
+    seedmesh serve      host blocks for a swarm
+    seedmesh bootstrap  run the rendezvous peer a swarm needs
+    seedmesh chat       talk to a swarm
 
 `simulate` remains for developing the trust layer against adversarial scenarios without any
 backend at all.
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import Optional, Sequence
 
 from seedmesh import __version__
@@ -145,6 +147,16 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             return 2
 
     num_blocks = args.num_blocks
+    if num_blocks == 0:
+        # Petals accepts --num_blocks 0, measures throughput for ~a minute, and only then
+        # dies in ModuleAnnouncerThread on `module_uids[0]` with an empty list. Looking
+        # healthy for a minute first is what makes this worth catching here.
+        print("A bootstrap peer is not a zero-block server -- Petals crashes on an empty")
+        print("block list once it finishes measuring throughput. Use:\n")
+        print("  seedmesh bootstrap --port 31337 --announce-ip <your public IP>\n")
+        print("It needs no --model: a DHT node relays discovery for any swarm.")
+        return 2
+
     if num_blocks is None:
         gpus = detect_gpus()
         if not gpus:
@@ -188,6 +200,84 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         return 0
     except FileNotFoundError:
         print("Could not launch the Petals server. Run `seedmesh setup` first.")
+        return 2
+
+
+# ---- bootstrap --------------------------------------------------------------
+
+
+def _announce_maddr(ip: str, port: int) -> str:
+    """Validate an announce IP before it reaches libp2p.
+
+    Placeholder IPs are a real failure mode -- the guide says YOUR_PUBLIC_IP and that string
+    gets pasted verbatim. libp2p's own complaint about it is not obviously about the IP.
+    """
+    import ipaddress
+
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        raise ValueError(
+            f"{ip!r} is not an IP address. Pass the VPS's actual public IPv4, e.g. "
+            f"--announce-ip 203.0.113.10 (find it with `curl -4 ifconfig.me`)."
+        ) from None
+    if not address.is_global:
+        raise ValueError(
+            f"{ip} is not a public address, so other peers cannot dial it.\n"
+            f"  A VPS usually sees only its private address locally -- take the public one "
+            f"from your provider's console, or `curl -4 ifconfig.me`."
+        )
+    family = "ip6" if address.version == 6 else "ip4"
+    return f"/{family}/{ip}/tcp/{port}"
+
+
+def _cmd_bootstrap(args: argparse.Namespace) -> int:
+    """Run a DHT-only rendezvous peer.
+
+    NOT `serve --num-blocks 0`. A Petals server with zero blocks builds a ModuleAnnouncer
+    from an empty uid list and dies on `module_uids[0]` -- but only after ~1 minute of
+    throughput measurement, so it looks like it started fine first. A bootstrap peer is a
+    DHT node, which is a different program (petals.cli.run_dht).
+    """
+    import subprocess
+    from pathlib import Path
+
+    host_maddrs = args.host_maddrs or [f"/ip4/0.0.0.0/tcp/{args.port}"]
+
+    command = [sys.executable, "-m", "petals.cli.run_dht", "--host_maddrs", *host_maddrs]
+
+    if args.announce_ip:
+        try:
+            command += ["--announce_maddrs", _announce_maddr(args.announce_ip, args.port)]
+        except ValueError as exc:
+            print(exc)
+            return 2
+    else:
+        print("no --announce-ip given: the peer will advertise whatever address it sees "
+              "locally,\n  which on most VPSs is a private one nobody can dial.\n")
+
+    if args.initial_peers:
+        command += ["--initial_peers", *args.initial_peers]
+
+    # A stable peer id matters more here than anywhere else: the address is the thing every
+    # volunteer has pasted into their own command line.
+    identity = Path(args.identity_path).expanduser()
+    identity.parent.mkdir(parents=True, exist_ok=True)
+    command += ["--identity_path", str(identity)]
+    if not identity.exists():
+        print(f"creating a new peer identity at {identity}")
+        print("  Keep this file. Losing it changes the bootstrap address and everyone "
+              "has to re-paste it.\n")
+
+    command += args.passthrough
+
+    print(f"$ {' '.join(command)}\n")
+    try:
+        return subprocess.call(command)
+    except KeyboardInterrupt:
+        return 0
+    except FileNotFoundError:
+        print("Could not launch the DHT node. Run `seedmesh setup` first.")
         return 2
 
 
@@ -284,6 +374,32 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    bootstrap = subparsers.add_parser(
+        "bootstrap",
+        help="run the always-on rendezvous peer a swarm needs (no GPU, no model)",
+    )
+    bootstrap.add_argument("--port", type=int, default=31337)
+    bootstrap.add_argument(
+        "--announce-ip",
+        default=None,
+        help="the machine's PUBLIC IPv4 -- what it tells other peers to dial. A VPS "
+             "usually only sees its private address, so without this nobody can reach it.",
+    )
+    bootstrap.add_argument(
+        "--initial-peers", nargs="+", default=None,
+        help="join an existing DHT (for running a second bootstrap); omit to start a new one",
+    )
+    bootstrap.add_argument(
+        "--identity-path",
+        default=str(Path.home() / ".seedmesh" / "bootstrap.key"),
+        help="keeps the peer id stable across restarts; losing it changes the address",
+    )
+    bootstrap.add_argument("--host-maddrs", nargs="+", default=None, help="advanced; overrides --port")
+    bootstrap.add_argument(
+        "passthrough", nargs="*", metavar="-- DHT_ARGS",
+        help="anything after a bare '--' goes to petals.cli.run_dht verbatim",
+    )
+
     chat = subparsers.add_parser("chat", help="talk to a swarm")
     chat.add_argument("--model", default=DEFAULT_MODEL)
     chat.add_argument("--initial-peers", nargs="+", default=None)
@@ -314,6 +430,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return {
         "probe": _cmd_probe,
         "serve": _cmd_serve,
+        "bootstrap": _cmd_bootstrap,
         "chat": _cmd_chat,
         "simulate": _cmd_simulate,
     }[args.command](args)

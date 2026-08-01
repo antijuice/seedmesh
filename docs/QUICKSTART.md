@@ -109,12 +109,15 @@ relays discovery metadata) is the usual answer.
 On the VPS:
 
 ```bash
-seedmesh serve --model JackFram/llama-160m --num-blocks 0 \
-  --host-maddrs /ip4/0.0.0.0/tcp/31337
+seedmesh bootstrap --port 31337 --announce-ip <the VPS's public IPv4>
 ```
 
-It prints `Running a server on ['/ip4/.../tcp/31337/p2p/Qm...']`. That address is what
-everyone else passes to `--initial-peers`. Open port 31337.
+A bootstrap peer is a DHT node, not a server with zero blocks — it takes no `--model`, and
+one bootstrap serves any swarm. (`serve --num-blocks 0` crashes inside Petals about a minute
+in, after looking healthy; it now refuses up front and points here.)
+
+It prints a `/ip4/.../tcp/31337/p2p/Qm...` address. That is what everyone else passes to
+`--initial-peers`. Open port 31337.
 
 Everyone else then runs step 3 or 4 against it.
 
