@@ -45,11 +45,24 @@ seedmesh/
 Try it:
 
 ```bash
-pip install -e ".[dev]" && seedmesh simulate
+pip install -e . && seedmesh probe --model Qwen/Qwen3-8B
 ```
 
-Runs three scenarios end to end — a healthy swarm, a mixed-threat swarm, and a sybil fleet —
-and prints calibrated thresholds, detection outcomes, and load distribution.
+`probe` needs no GPU-side install and no weight download — it reads the model config and
+your hardware and tells you what you could host. On a 4 GB laptop GPU that is 30 of an 8B
+model's 36 blocks at NF4.
+
+To run or join a swarm, see **[docs/QUICKSTART.md](docs/QUICKSTART.md)**:
+
+```bash
+seedmesh setup                                        # install + patch the backend
+seedmesh serve --model <m> --initial-peers <addr>     # donate compute
+seedmesh chat  --model <m> --initial-peers <addr>     # use the swarm
+seedmesh simulate                                     # adversarial scenarios, no backend
+```
+
+`simulate` runs three scenarios end to end — healthy, mixed-threat, and a sybil fleet — and
+prints calibrated thresholds, detection outcomes and load distribution.
 
 ## Two corrections that shaped the design
 
@@ -113,6 +126,9 @@ ASNs defeats the anti-sybil rules. A caught peer can discard its identity and re
 
 | | |
 | --- | --- |
+| [QUICKSTART.md](docs/QUICKSTART.md) | Install, join a swarm, run one — and what doesn't work yet |
+| [BOOTSTRAP.md](docs/BOOTSTRAP.md) | Standing up the always-on rendezvous peer a swarm needs |
+| [NAT-AND-RELAYS.md](docs/NAT-AND-RELAYS.md) | Hosting from a laptop behind home wifi |
 | [architecture.md](docs/architecture.md) | How the layers fit, and why each defence exists |
 | [threat-model.md](docs/threat-model.md) | Defended, not defended, open questions |
 | [security-privacy.md](docs/security-privacy.md) | For volunteers and for users |

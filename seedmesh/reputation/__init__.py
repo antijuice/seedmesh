@@ -23,6 +23,7 @@ from seedmesh.reputation.diversity import (
     TableAsnResolver,
     UNKNOWN_CLUSTER,
 )
+from seedmesh.reputation.gossip import GossipStats, ReputationGossip
 from seedmesh.reputation.records import (
     EpochStore,
     ObservationBatch,
@@ -39,7 +40,9 @@ __all__ = [
     "AggregationConfig",
     "ClusterIndex",
     "EpochStore",
+    "GossipStats",
     "Hop",
+    "ReputationGossip",
     "NullAsnResolver",
     "ObservationBatch",
     "PeerReport",

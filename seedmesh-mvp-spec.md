@@ -156,7 +156,21 @@ that a structural property rather than a convention.
 
 ## 3. What to actually add on top (the real v1 scope)
 
-### 3.1 Reputation layer — **BUILT**
+### 3.1 Reputation layer — **BUILT, AND NOW SHARED**
+
+Gossip (`seedmesh/reputation/gossip.py`) closes the gap between "signed records exist" and
+"the swarm shares experience". One DHT key per observer holds that observer's signed batch;
+a small **directory** record (one key, one tiny subkey entry per observer) makes observers
+discoverable, because a DHT cannot enumerate keys and block-discovery only returns *servers*
+— while the peers with observations to share are *clients*. Verified round-tripping through
+a real hivemind DHT with the signature intact.
+
+Scores also persist across restarts now (`ReputationScorer.save/load`), with elapsed decay
+applied on load rather than resuming as though no time passed. A confirmed mismatch has a
+30-day half-life precisely so it outlives a session.
+
+Remaining: only clients gossip, since servers observe nothing. A one-client swarm therefore
+has one observer and nothing to exchange.
 
 The original design (rolling reliability score, stored in the DHT, biasing routing) was
 right in outline and had one hole:
@@ -388,10 +402,21 @@ unresolved — shared public swarm, or exo-style "mesh my own devices":
 network citizens pending a real license read, and notes that `qwen2.5-7b-instruct` is the
 pragmatic option because it is Apache-2.0 *and* within the existing transformers pin.
 
-### 3.4 Onboarding polish — not started
-One-command install with hardware auto-detection, and a public leaderboard/thank-you page.
-`seedmesh probe` exists as a stub; block-count recommendation needs the backend adapter to
-know per-block memory footprint.
+### 3.4 Onboarding polish — **BUILT (install + CLI); leaderboard not started**
+
+- `seedmesh setup` clones Petals, applies the port codemod, installs dependencies and
+  verifies — the alternative was walking every volunteer through a codemod by hand.
+- `seedmesh probe` sizes block count analytically from a model config and `nvidia-smi`,
+  needing **neither torch nor a weight download**: a volunteer can size a 70B model before
+  committing to any traffic. Uses the bytes/param constants measured in the quantization
+  spike. Real result: 30 of Qwen3-8B's 36 blocks on a 4GB laptop GPU at NF4.
+- `seedmesh serve` auto-sizes and wraps the Petals server; `seedmesh chat` is a client.
+- `docs/QUICKSTART.md` is the volunteer-facing entry point, including an explicit
+  "what does not work yet" section.
+
+Still to do here: the public leaderboard/thank-you page, and the fact that a bootstrap peer
+needs a publicly reachable host (neither a home PC behind NAT nor a Colab notebook can be
+dialled, so a swarm of only those cannot form).
 
 ### 3.5 Governance & comms — **BUILT (docs)**
 `GOVERNANCE.md` exists with the explicit non-monetization pledge. `CONTRIBUTING.md` exists.

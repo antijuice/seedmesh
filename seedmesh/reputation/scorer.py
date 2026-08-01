@@ -539,6 +539,88 @@ class ReputationScorer:
         observations = state.observations if state else 0.0
         return coefficient / math.sqrt(1.0 + observations)
 
+    # ---- persistence -----------------------------------------------------------
+
+    def save(self, path) -> None:
+        """Persist scores so a restart does not discard everything measured.
+
+        Without this a client rejoining a swarm re-learns every peer from the prior, which
+        wastes the requests that produced the evidence and briefly re-exposes it to peers it
+        had already excluded. Integrity state matters most: a confirmed mismatch has a 30-day
+        half-life precisely so it outlives a session.
+
+        Decayed counters are stored raw alongside their last-decay timestamps, so reloading
+        after an outage applies the elapsed decay rather than resuming as though no time
+        passed.
+        """
+        import json
+        from pathlib import Path
+
+        payload = {
+            "version": 1,
+            "saved_at": self.clock.now(),
+            "peers": {
+                peer_id: {
+                    "success": state.success,
+                    "failure": state.failure,
+                    "observations": state.observations,
+                    "integrity_pass": state.integrity_pass,
+                    "direct_faults": state.direct_faults,
+                    "confirmed_mismatches": state.confirmed_mismatches,
+                    "comparisons": state.comparisons,
+                    "disputes": dict(state.disputes),
+                    "ambiguous": dict(state.ambiguous),
+                    "last_reliability_decay": state.last_reliability_decay,
+                    "last_integrity_decay": state.last_integrity_decay,
+                    "latencies": [[v, w] for v, w in (state.latencies._samples if state.latencies else [])],
+                    "latency_last_decay": state.latencies._last_decay if state.latencies else 0.0,
+                }
+                for peer_id, state in self._peers.items()
+            },
+        }
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Write-then-rename: a crash mid-save must not leave a truncated file that silently
+        # resets every score on next start.
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload), encoding="utf-8")
+        temporary.replace(target)
+
+    def load(self, path) -> int:
+        """Restore scores. Returns how many peers were loaded; 0 if there is nothing to load."""
+        import json
+        from pathlib import Path
+
+        source = Path(path)
+        if not source.exists():
+            return 0
+        try:
+            payload = json.loads(source.read_text(encoding="utf-8"))
+        except Exception:
+            return 0  # corrupt state is not worth crashing a client over
+        if payload.get("version") != 1:
+            return 0
+
+        for peer_id, saved in payload.get("peers", {}).items():
+            state = self._state(peer_id)
+            state.success = float(saved.get("success", 0.0))
+            state.failure = float(saved.get("failure", 0.0))
+            state.observations = float(saved.get("observations", 0.0))
+            state.integrity_pass = float(saved.get("integrity_pass", 0.0))
+            state.direct_faults = float(saved.get("direct_faults", 0.0))
+            state.confirmed_mismatches = float(saved.get("confirmed_mismatches", 0.0))
+            state.comparisons = float(saved.get("comparisons", 0.0))
+            state.disputes = {k: float(v) for k, v in (saved.get("disputes") or {}).items()}
+            state.ambiguous = {k: float(v) for k, v in (saved.get("ambiguous") or {}).items()}
+            state.last_reliability_decay = float(saved.get("last_reliability_decay", 0.0))
+            state.last_integrity_decay = float(saved.get("last_integrity_decay", 0.0))
+            if state.latencies is not None:
+                state.latencies._samples = [
+                    [float(v), float(w)] for v, w in saved.get("latencies", [])
+                ]
+                state.latencies._last_decay = float(saved.get("latency_last_decay", 0.0))
+        return len(payload.get("peers", {}))
+
     def export_reports(self, *, since: float = 0.0) -> dict[PeerId, dict]:
         """Snapshot of local belief, shaped for publishing as signed observation reports."""
         now = self.clock.now()

@@ -230,6 +230,57 @@ def main() -> int:
                 print(f"  subject integrity after: "
                       f"{scorer.breakdown(subject.peer_id).integrity:.4f}")
 
+        # --- 7. reputation gossip over the real DHT ------------------------------
+        print("\nreputation gossip:")
+        from seedmesh.core.identity import Identity
+        from seedmesh.reputation.aggregate import AggregationConfig, ReputationAggregator
+
+        # Observers are keyed by their Ed25519 id; their network cluster comes from the
+        # transport peer we fetched them from. Without that mapping the aggregator's
+        # per-cluster weight caps would not bind.
+        observer_clusters: dict[str, str] = {}
+        transport_addresses = {s.peer_id: s.address for s in servers}
+
+        def cluster_of(peer: str) -> str:
+            if peer in observer_clusters:
+                return observer_clusters[peer]
+            match = next((s for s in servers if s.peer_id == peer), None)
+            return geo_clusters.coarse_of(match) if match else "cluster:unknown"
+
+        def locate(observer: str, transport: str) -> None:
+            address = transport_addresses.get(transport)
+            observer_clusters[observer] = f"net:{address}" if address else "cluster:unknown"
+
+        aggregator = ReputationAggregator(cluster_of, AggregationConfig())
+        gossip = backend.make_gossip(
+            Identity.generate(), scorer, aggregator, observer_locator=locate
+        )
+
+        record = gossip.publish()
+        if record is None:
+            print("  nothing measured yet to publish")
+        else:
+            print(f"  published {len(record['reports'])} report(s) as "
+                  f"...{record['observer'][-8:]} at epoch {record['epoch']}")
+            print(f"  DHT key: {gossip.key_for(gossip.transport_id)}")
+
+        # Fetch back from the real DHT -- proves the record round-trips and verifies.
+        readback = backend.dht_fetch([gossip.key_for(gossip.transport_id)])
+        stored = next(iter(readback.values()))
+        print(f"  read back from DHT: {'yes' if stored else 'no'}"
+              + (f", {len(stored['reports'])} report(s), signature intact"
+                 if stored else ""))
+
+        directory = gossip.known_observers()
+        print(f"  observer directory: {len(directory)} other observer(s) advertised")
+        accepted = gossip.fetch(set(directory) | {s.peer_id for s in servers})
+        print(f"  fetched peers' records: {accepted} accepted")
+        if accepted == 0:
+            print("    (expected here: the servers run no client, so this is the only")
+            print("     observer in the swarm. Two clients would exchange records.)")
+        for line in gossip.describe():
+            print(line)
+
         print("\nranked servers after this run:")
         for breakdown in scorer.ranked([s.peer_id for s in servers]):
             print(
