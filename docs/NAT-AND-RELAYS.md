@@ -85,7 +85,8 @@ Two consequences:
 
 **A long timeout is actively harmful.** Since a stalled request never completes, the timeout
 only decides how long a doomed request blocks. Petals' 180s default turns a one-second retry
-into a three-minute hang. `seedmesh chat` defaults to 30s for this reason.
+into a three-minute hang. `seedmesh chat` defaults to 10s for this reason, and retries
+with a fresh session rather than waiting.
 
 **A stall that lands mid-generation still kills the request.** Petals' recovery path rebuilds
 the server session at position 0 while the client is mid-sequence, so it raises
@@ -95,13 +96,8 @@ resends the whole prefix. Fixing it properly means changing how the outer step l
 inputs after a failure — not just the session bookkeeping. Untouched for now, and the reason
 roughly one prompt in three still fails on a relayed swarm.
 
-### So: forward the port if you can
-
-If you are hosting and can forward **TCP 31337** to your machine on your router, do it.
-Petals' `check_direct_reachability` will then succeed, the server runs as a full peer instead
-of `client_mode`, and none of the above applies — no relay, no stalls. Relaying is the
-fallback for volunteers who cannot change their router, and it should be described to them as
-"works, intermittently" rather than "works".
+A direct connection avoids all of it — see *The real constraint* below for how to get one,
+and why "just forward a port" is not the whole answer on Windows.
 
 ## Located: the stall is on the relay return path, every 3rd request
 
@@ -164,26 +160,111 @@ That predicts the stall period should track *bytes*, not requests. For llama-160
 
 Back-solving from all three gives ~130–145 KB, i.e. 128 KiB plus framing. Confirmed.
 
-### Why this is worse than it looks, and the fix
+### Why this is worse than it looks
 
 Bytes/request scales with hidden size and dtype. **Llama-3.1-8B is hidden 4096 at bf16 =
 8192 bytes/token**, so one 30-token request moves ~245 KB — past the budget *within a single
 request*, every request, where retrying cannot help. Relayed hosting of a real model is
-impossible on the default budget, not merely flaky.
+impossible on this budget, not merely flaky.
 
 A 128 KiB budget is sized for bootstrapping a direct connection via hole punching, and
 **p2pd exposes no hole-punching (DCUtR) flag** — so relayed connections stay relayed forever
-and never escape the budget.
+and never escape it.
 
-The relay grants the budget in its reservation, so the **bootstrap peer** is the one machine
-that can fix it for everybody. p2pd accepts `-relayDataLimit` and `-relayTimeLimit` (it
-documents defaults of 4 GiB and 30m, which are evidently not what the relay service ends up
-using), but hivemind builds its p2pd argv from a fixed keyword set with no passthrough.
-`seedmesh/cli/bootstrap_dht.py` wraps `P2P._make_process_args` to inject them, and
-`seedmesh bootstrap` runs that shim instead of `petals.cli.run_dht` directly.
+### The budget cannot be raised. Do not try again.
 
-**Whoever runs the bootstrap must restart it on this version.** Volunteers change nothing;
-raising the relay's budget fixes every NAT'd peer at once, without anyone touching a router.
+p2pd accepts `-relayDataLimit` and `-relayTimeLimit`, and hivemind can be made to pass them
+by wrapping `P2P._make_process_args`. **This was built, deployed to a real relay, and
+measured three times. It changes nothing** — byte-for-byte identical stall patterns with and
+without the flags.
+
+The tell was visible beforehand and was missed: p2pd's own help advertises
+`-relayDataLimit ... (default 4294967296)`, i.e. 4 GiB. If that default were reaching the
+relay service the observed budget would never have been 128 KiB. p2pd parses these flags but
+never applies them to go-libp2p's relay resources, so `DefaultResources()` stands. The shim
+was removed rather than left in place claiming a budget it never got.
+
+## The real constraint: how many NATs is the host behind?
+
+Since the relay budget is fixed and small, a volunteer hosting anything larger than a toy
+model needs a **direct** address. p2pd already tries for one — it is launched with
+`-natPortMap=1` (UPnP / NAT-PMP). Why that fails is platform-specific, and the answer
+matters more than anything else in this document.
+
+**Hosting from WSL2 is behind two NATs.** Measured on Windows 11 with WSL 2.5.7:
+
+```
+Running a server on ['/ip4/127.0.0.1/tcp/44945/p2p/...',
+                     '/ip4/172.25.114.109/tcp/44945/p2p/...']
+Direct reachability: 0/1
+This server is accessible via relays
+```
+
+`172.25.114.109` is WSL2's *virtual switch*, not the machine's LAN address. So UPnP
+negotiates with the Hyper-V virtual gateway rather than the router, and a router
+port-forward would land on the Windows host without ever entering WSL. Port forwarding alone
+does not fix a WSL2 host; it also needs a `netsh interface portproxy` rule on the Windows
+side.
+
+**Fix for Windows hosts: mirrored networking.** WSL ≥ 2.0.0 on Windows 11 22H2+ can share the
+host's interfaces directly, removing the WSL NAT layer entirely. In `%USERPROFILE%\.wslconfig`:
+
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+
+then `wsl --shutdown` and reopen. WSL then holds the machine's real LAN address, so UPnP can
+reach the actual router and a port-forward arrives where it should. Caveats: mirrored mode
+interacts badly with some VPN clients, and Windows Firewall may need an inbound allow rule.
+
+**The ladder, best first:**
+
+| | who | effort |
+| --- | --- | --- |
+| 1. Native Linux or macOS host | one NAT; UPnP often just works | none |
+| 2. WSL2 + `networkingMode=mirrored` | Windows volunteers | one config line + restart |
+| 3. Router port forward (+ `netsh portproxy` if still on WSL NAT) | anyone whose router lacks UPnP | real setup |
+| 4. Relay | everyone else | works, but capped at 128 KiB/connection — toy models only |
+
+### Measured after mirrored networking + pinned port + firewall rule (2026-08-01)
+
+Same laptop, server pinned to `0.0.0.0:31338`, Windows Firewall inbound allowed:
+
+| max_new_tokens | KB/request | before | after |
+| --- | --- | --- | --- |
+| 1 | 24 | 13/15 | **15/15** |
+| 8 | 45 | 10/15 | **15/15** |
+| 32 | 117 | **0/15** | **15/15** |
+
+The byte-budget stalls are gone — but read the server's own record before concluding
+anything:
+
+```
+using_relay : True
+```
+
+`using_relay` is `reachable_via_relay`, set once at startup by `check_direct_reachability`
+(can the bootstrap dial me back?). `True` means **the server is still not publicly
+reachable**. The sweep passed because the client was on the *same LAN* and dialled
+`10.0.0.155:31338` directly, bypassing the relay entirely.
+
+So what this proves: mirrored networking + a pinned port + a firewall rule make the direct
+path work **for same-LAN clients**. What it does not prove: anything about a remote peer,
+who still gets the relay and still hits the 128 KiB budget.
+
+**A firewall rule is not enough on its own.** Inbound has to clear three things: the Windows
+firewall (done), the WSL NAT layer (removed by mirrored mode), and **the router**, which must
+map the public IP's port 31338 to the machine. UPnP is enabled in p2pd (`-natPortMap=1`) and
+is evidently not getting that mapping, so it needs either UPnP switched on in the router or a
+manual forward.
+
+The check that matters: restart the server and look for `accessible directly` instead of
+`accessible via relays`. Until that flips, remote volunteers are relayed.
+
+Note also the warm-up window varies — measured at ~180-195s repeatedly, but ~45s in this
+run. Treat it as "up to a few minutes", not a constant.
+
 
 ### Why the mitigation is the right shape anyway
 
@@ -195,3 +276,32 @@ fresh session (`generate_with_retry`). Measured 12/12 prompts answered.
 optimisation and it is actively worse: once a stall lands inside a shared session, the
 session is permanently poisoned with `AssertionError: Broken input cache` and every later
 prompt in it fails. Measured 10/12 failures versus 4/12.
+
+## Root cause: a swarm needs at least 4 publicly reachable peers
+
+Everything above — the 128 KiB budget, the stalls, the "just forward a port" advice —
+descends from one deployment fact. Measured 2026-08-01 with hole-punch logging on both a
+home-NAT laptop server and a Colab client:
+
+```
+[holepunch/svc.go:98] waiting until we have at least one public address
+```
+
+on **both** ends, forever. go-libp2p v0.32.1 explains it exactly:
+
+- `holepunch/svc.go` — `watchForPublicAddr()` blocks until the host observes a public address
+  for itself; the hole-punch handler waits on that channel. No public address, no DCUtR.
+- `identify/obsaddr.go` — `var ActivationThresh = 4`, and an address is accepted only when
+  `len(oa.seenBy) >= ActivationThresh`: **four distinct peers must independently report the
+  same observed address.**
+
+This swarm has one public peer. Four are needed. So no NAT'd host ever learns its own public
+address, DCUtR never starts, every connection stays relayed, and relayed connections are cut
+off at 128 KiB.
+
+**The fix is deployment, not code.** Run four or more publicly reachable peers and volunteers
+behind NAT should upgrade to direct connections on their own — no router configuration by
+anyone. This is a source-derived prediction, not yet measured; DCUtR must still traverse the
+real NATs, and symmetric NAT or CGNAT can defeat it regardless. Note also
+`maxObservedAddrsPerIPAndTransport = 2`, so four peers sharing one IP may not count as four
+observers.

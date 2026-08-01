@@ -201,10 +201,11 @@ def test_bootstrap_needs_no_model(parser):
 def test_serve_with_zero_blocks_refuses_and_points_at_bootstrap(parser, capsys, monkeypatch):
     from seedmesh.cli import main as main_module
 
-    # The Windows guard would otherwise short-circuit this on the dev machine; the
-    # zero-block refusal is platform-independent, so the test should be too.
+    # The platform and backend guards would otherwise short-circuit this on the dev machine
+    # (Windows, no petals). The zero-block refusal is independent of both, so the test
+    # should be too.
     monkeypatch.setattr(main_module, "_refuse_on_windows", lambda what: False)
-    monkeypatch.setattr(main_module, "_cmd_serve", main_module._cmd_serve)
+    monkeypatch.setattr(main_module, "_backend_missing", lambda what: False)
 
     args = parser.parse_args(["serve", "--model", "JackFram/llama-160m", "--num-blocks", "0"])
     assert main_module._cmd_serve(args) == 2
@@ -427,58 +428,97 @@ def test_chat_disables_the_petals_internal_retry_path(parser):
     assert "generate_with_retry" in source
 
 
-# ---- relay data budget -------------------------------------------------------
+# ---- wrong-environment detection --------------------------------------------
 #
-# Root cause of the every-Nth-request stall, found 2026-08-01. go-libp2p's circuit-relay-v2
-# resets a relayed connection after ~128 KiB per direction (DefaultResources) and nothing
-# above it notices, so the in-flight request hangs until the client's timeout. Confirmed by
-# prediction: the stall period tracks bytes/request, not request count.
-#
-#   ~24 KB/request  -> stall every 6.0    (predicted 5.3)
-#   ~45 KB/request  -> stall every 3.0    (predicted 2.8)
-#  ~117 KB/request  -> every request      (predicted 1.1)
-#
-# p2pd accepts -relayDataLimit/-relayTimeLimit but hivemind builds its argv from a fixed
-# keyword set, so the shim wraps _make_process_args to inject them.
+# `serve` and `bootstrap` re-invoke sys.executable. A `seedmesh` on PATH from a different
+# environment than the one `seedmesh setup` installed into (a conda base shadowing a venv)
+# produced a bare "No module named 'petals'" from a subprocess, which reads as a broken
+# install rather than the wrong Python.
 
 
-def test_relay_budget_flags_reach_the_daemon_argv(monkeypatch):
-    hivemind_p2p = pytest.importorskip(
-        "hivemind.p2p.p2p_daemon", reason="hivemind does not run natively on Windows"
-    )
-    from seedmesh.cli.bootstrap_dht import RELAY_DATA_LIMIT, raise_relay_budget
-
-    original = hivemind_p2p.P2P._make_process_args
-    monkeypatch.setattr(hivemind_p2p.P2P, "_make_process_args", original)
-
-    raise_relay_budget()
-    argv = hivemind_p2p.P2P._make_process_args("p2pd", relay=1)
-
-    assert f"-relayDataLimit={RELAY_DATA_LIMIT}" in argv
-    assert any(arg.startswith("-relayTimeLimit=") for arg in argv)
-    assert "-relayService=1" in argv
-
-
-def test_relay_budget_does_not_override_an_explicit_value(monkeypatch):
-    hivemind_p2p = pytest.importorskip(
-        "hivemind.p2p.p2p_daemon", reason="hivemind does not run natively on Windows"
-    )
-    from seedmesh.cli.bootstrap_dht import raise_relay_budget
-
-    original = hivemind_p2p.P2P._make_process_args
-    monkeypatch.setattr(hivemind_p2p.P2P, "_make_process_args", original)
-
-    raise_relay_budget()
-    argv = hivemind_p2p.P2P._make_process_args("p2pd", relayDataLimit=999)
-    assert "-relayDataLimit=999" in argv
-
-
-def test_bootstrap_launches_the_shim_not_run_dht_directly():
-    """Going straight to petals.cli.run_dht would leave the relay on the 128 KiB default,
-    and the relay is the only party that can grant a bigger budget."""
-    import inspect
+def test_missing_backend_names_the_interpreter_and_the_fix(capsys, monkeypatch):
+    import importlib.util
 
     from seedmesh.cli import main as main_module
 
-    source = inspect.getsource(main_module._cmd_bootstrap)
-    assert "seedmesh.cli.bootstrap_dht" in source
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    assert main_module._backend_missing("Hosting blocks") is True
+
+    out = capsys.readouterr().out
+    assert "which -a seedmesh" in out, "must show how to find the shadowing copy"
+    assert "seedmesh setup" in out
+    assert "Hosting blocks" in out
+
+
+def test_backend_present_is_not_reported_as_missing(capsys, monkeypatch):
+    import importlib.util
+
+    from seedmesh.cli import main as main_module
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
+    assert main_module._backend_missing("Hosting blocks") is False
+    assert capsys.readouterr().out == ""
+
+
+# ---- warm-up window ----------------------------------------------------------
+#
+# A server's block records reach the DHT well before its libp2p peer-routing record, so a
+# client that connects during that window sees full coverage and can dial nobody. Measured
+# ~180-195s on a real swarm, repeatedly, and it applies PER CLIENT -- a second client
+# joining an already-serving swarm waits again. Without handling, the volunteer's first
+# prompt fails instantly and the swarm looks broken.
+
+
+def test_routing_failure_is_recognised():
+    from seedmesh.cli.main import is_routing_failure
+
+    assert is_routing_failure(RuntimeError("P2PDaemonError('routing: not found')"))
+    assert not is_routing_failure(TimeoutError())
+
+
+def test_wait_returns_as_soon_as_the_swarm_is_routable():
+    from seedmesh.cli.main import wait_until_routable
+
+    calls = []
+
+    def probe():
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("routing: not found")
+
+    assert wait_until_routable(probe, timeout=100, interval=0) is True
+    assert len(calls) == 3
+
+
+def test_wait_gives_up_rather_than_blocking_forever():
+    from seedmesh.cli.main import wait_until_routable
+
+    def never():
+        raise RuntimeError("routing: not found")
+
+    assert wait_until_routable(never, timeout=0.05, interval=0) is False
+
+
+def test_a_real_fault_is_not_mistaken_for_warm_up():
+    """Waiting out a genuine error would hide it for five minutes."""
+    from seedmesh.cli.main import wait_until_routable
+
+    def broken():
+        raise ValueError("something actually wrong")
+
+    with pytest.raises(ValueError):
+        wait_until_routable(broken, timeout=100, interval=0)
+
+
+def test_the_user_is_told_why_it_is_waiting():
+    from seedmesh.cli.main import wait_until_routable
+
+    seen = []
+
+    def probe():
+        if len(seen) < 1:
+            raise RuntimeError("routing: not found")
+
+    wait_until_routable(probe, timeout=100, interval=0,
+                        notify=lambda n, remaining: seen.append(n))
+    assert seen, "silently hanging for three minutes is indistinguishable from a freeze"

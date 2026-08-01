@@ -41,6 +41,11 @@ DEFAULT_MODEL = "JackFram/llama-160m"
 CHAT_REQUEST_TIMEOUT = 10
 CHAT_ATTEMPTS = 4
 
+# A new client must wait for the server's peer-routing record to propagate before it can
+# dial anyone. Measured ~180-195s repeatedly on a real swarm, and it applies per client, not
+# per server. 5 minutes leaves headroom.
+CHAT_WARMUP_TIMEOUT = 300.0
+
 
 # ---- simulate ---------------------------------------------------------------
 
@@ -154,9 +159,41 @@ def _refuse_on_windows(what: str) -> bool:
     return True
 
 
+def _backend_missing(what: str) -> bool:
+    """Check the backend exists in THIS interpreter before shelling out to it.
+
+    `serve` and `bootstrap` re-invoke `sys.executable`, so a `seedmesh` on PATH from a
+    different environment than the one `seedmesh setup` installed into produces
+    "No module named 'petals'" from a subprocess -- which reads like a broken install rather
+    than the wrong Python. A conda base env shadowing a venv is the usual cause.
+
+    find_spec rather than import: no need to pay for loading torch just to answer this.
+    """
+    import importlib.util
+
+    try:
+        if importlib.util.find_spec("petals") is not None:
+            return False
+    except (ImportError, ValueError):
+        pass
+
+    print(f"{what} needs the Petals backend, which is not installed in this Python:")
+    print(f"    {sys.executable}\n")
+    print("`seedmesh` is probably being run from a different environment than the one")
+    print("`seedmesh setup` installed into. Check which copies exist:")
+    print("    which -a seedmesh\n")
+    print("Then either run the one whose environment has the backend, e.g.")
+    print("    ~/.venv/bin/seedmesh ...")
+    print("or install the backend into this environment:")
+    print("    seedmesh setup")
+    return True
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     """Wrap Petals' server with auto-sizing and friendlier defaults."""
     if _refuse_on_windows("Hosting blocks"):
+        return 2
+    if _backend_missing("Hosting blocks"):
         return 2
 
     from seedmesh.cli.hardware import (
@@ -276,16 +313,21 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
     throughput measurement, so it looks like it started fine first. A bootstrap peer is a
     DHT node, which is a different program (petals.cli.run_dht).
     """
+    if _backend_missing("Running a bootstrap peer"):
+        return 2
+
     import subprocess
     from pathlib import Path
 
     host_maddrs = args.host_maddrs or [f"/ip4/0.0.0.0/tcp/{args.port}"]
 
-    # Not petals.cli.run_dht directly: the shim raises the circuit-relay data budget from
-    # go-libp2p's 128 KiB default before starting the same DHT node. See bootstrap_dht.py --
-    # that default silently resets a relayed connection mid-request, and the relay is the
-    # only party that can grant a bigger one.
-    command = [sys.executable, "-m", "seedmesh.cli.bootstrap_dht", "--host_maddrs", *host_maddrs]
+    # NOTE: raising go-libp2p's 128 KiB circuit-relay budget was tried here and does not
+    # work -- p2pd accepts -relayDataLimit/-relayTimeLimit but never applies them to the
+    # relay service, so the service keeps DefaultResources(). Measured three times against a
+    # real relay: byte-for-byte identical stall patterns with and without the flags. Its own
+    # help already advertises a 4 GiB default while the observed budget is 128 KiB, which is
+    # the tell. Don't re-attempt it; see docs/NAT-AND-RELAYS.md.
+    command = [sys.executable, "-m", "petals.cli.run_dht", "--host_maddrs", *host_maddrs]
 
     if args.announce_ip:
         try:
@@ -405,6 +447,44 @@ def _quiet_hivemind_finalizers() -> None:
     sys.unraisablehook = hook
 
 
+def is_routing_failure(exc: BaseException) -> bool:
+    """`routing: not found` -- the DHT knows the server's blocks but not yet its address."""
+    return "routing: not found" in str(exc)
+
+
+def wait_until_routable(probe, timeout=CHAT_WARMUP_TIMEOUT, interval=15.0, notify=None):
+    """Block until the swarm can actually be reached, or give up.
+
+    A server's *block* records reach the DHT long before its libp2p *peer routing* record
+    does, so a client that connects during that window sees full block coverage and cannot
+    dial anyone. Measured repeatedly on a real swarm: ~180-195s, and it applies per client,
+    not per server -- a second client joining an already-serving swarm waits again.
+
+    Without this the volunteer's first prompt fails instantly and the swarm looks broken at
+    exactly the moment they are deciding whether this thing works.
+
+    Returns True once routable, False on timeout. Any error that is not a routing failure
+    propagates -- a real fault should not be mistaken for warm-up.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    attempt = 0
+    while True:
+        try:
+            probe()
+            return True
+        except Exception as exc:
+            if not is_routing_failure(exc):
+                raise
+            if time.monotonic() + interval >= deadline:
+                return False
+            attempt += 1
+            if notify is not None:
+                notify(attempt, max(0.0, deadline - time.monotonic()))
+            time.sleep(interval)
+
+
 def generate_with_retry(generate, attempts=CHAT_ATTEMPTS, on_retry=None):
     """Run `generate`, retrying on a stalled request with a brand-new inference session.
 
@@ -469,6 +549,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     if _refuse_on_windows("Talking to a swarm"):
         return 2
 
+    if _backend_missing("Talking to a swarm"):
+        return 2
+
     try:
         import torch
         from hivemind.dht import DHT
@@ -476,7 +559,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
         from petals import AutoDistributedModelForCausalLM
     except ImportError as exc:
-        print(f"backend not installed ({exc}). Run `seedmesh setup` first.")
+        print(f"backend present but not importable ({exc}). Re-run `seedmesh setup`.")
         return 2
 
     peers = list(args.initial_peers or [])
@@ -499,6 +582,31 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         args.model, initial_peers=peers, torch_dtype=torch.float32,
         request_timeout=args.timeout, max_retries=1,
     )
+    # Wait out the warm-up window here rather than letting it eat the first prompt.
+    probe_ids = tokenizer("hello", return_tensors="pt")["input_ids"]
+
+    def probe():
+        with torch.inference_mode():
+            model.generate(probe_ids, max_new_tokens=1, do_sample=False)
+
+    def waiting(attempt, remaining):
+        if attempt == 1:
+            print("\nA server is announced but not dialable yet -- normal for a few minutes")
+            print("after one starts, because its blocks reach the DHT before its address")
+            print(f"does. Waiting up to {CHAT_WARMUP_TIMEOUT:.0f}s...", flush=True)
+        else:
+            print(f"  still waiting ({remaining:.0f}s left)", flush=True)
+
+    try:
+        if not wait_until_routable(probe, notify=waiting):
+            print(explain_inference_failure(RuntimeError("routing: not found")))
+            dht.shutdown()
+            return 1
+    except Exception as exc:
+        print(explain_inference_failure(exc))
+        dht.shutdown()
+        return 1
+
     print("connected. Type a prompt, or Ctrl-C to quit.\n")
 
     try:

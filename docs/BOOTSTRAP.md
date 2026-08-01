@@ -48,7 +48,7 @@ non-privileged account is the point. It runs a daemon exposed to the internet.)
     
     `\`\\`ssh root@YOUR_IP      
       
-    apt update && apt install -y python3-venv python3-pip git      
+    apt update && apt install -y python3-venv python3.12-venv python3-pip git      
     \\`    
     \`  
     `
@@ -98,6 +98,71 @@ does have a GPU. The download is still the slow part — this is what the swap a
 
 A successful run ends with `7/7 checks passed` and `ready.` — anything else means stop and  
 read the output rather than continuing to the next step.
+
+## Additional bootstrap peers (droplets 2, 3, 4)
+
+A swarm needs **at least four** publicly reachable peers before NAT'd volunteers can hole-punch
+to direct connections — see [NAT-AND-RELAYS.md](NAT-AND-RELAYS.md) for why (go-libp2p only
+accepts an observed public address after four *distinct* peers report it). Below is the whole
+provision as one paste, to avoid the ordering trap: everything here is root-level, and the
+`seedmesh` account is deliberately passwordless, so `sudo` from it can never work.
+
+Run as **root**, substituting the public IP and the first droplet's bootstrap address:
+
+```bash
+PUBLIC_IP=<this droplet's public IPv4>
+PEER1=<the first droplet's /ip4/.../p2p/... address>
+
+apt update && apt install -y python3-venv python3.12-venv python3-pip git
+
+fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+ufw allow OpenSSH && ufw allow 31337/tcp && ufw --force enable
+
+adduser --disabled-password --gecos "" seedmesh
+sudo -u seedmesh bash -lc "
+  git clone https://github.com/antijuice/seedmesh ~/seedmesh &&
+  python3 -m venv ~/.venv &&
+  ~/.venv/bin/pip install -q -e ~/seedmesh &&
+  ~/.venv/bin/seedmesh setup
+"
+
+tee /etc/systemd/system/seedmesh-bootstrap.service >/dev/null <<EOF
+[Unit]
+Description=Seedmesh bootstrap peer
+After=network-online.target
+
+[Service]
+User=seedmesh
+WorkingDirectory=/home/seedmesh/seedmesh
+ExecStart=/home/seedmesh/.venv/bin/seedmesh bootstrap --port 31337 --announce-ip ${PUBLIC_IP} --initial-peers ${PEER1}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl enable --now seedmesh-bootstrap
+journalctl -u seedmesh-bootstrap -f
+```
+
+`--initial-peers ${PEER1}` matters: without it each droplet starts its *own* isolated DHT and
+they never form one swarm.
+
+### Then point volunteers at all four
+
+This is the step that is easy to miss and makes the whole exercise pointless if skipped. The
+four-observer threshold counts peers that have actually *seen* your server, so a host must
+connect to all four:
+
+```bash
+seedmesh serve --model <m> --initial-peers <addr1> <addr2> <addr3> <addr4> --public-name "name"
+```
+
+Connecting to only one bootstrap gives one observer, and hole punching stays dormant exactly
+as it does today.
 
 ## The provider firewall is a separate thing
 
