@@ -45,12 +45,18 @@ from transformers import AutoTokenizer  # noqa: E402
 from petals import AutoDistributedModelForCausalLM  # noqa: E402
 from petals.utils.dht import get_remote_module_infos  # noqa: E402
 
-BOOTSTRAP = os.environ.get(
-    "SEEDMESH_BOOTSTRAP",
+# ALL FOUR, deliberately. go-libp2p accepts an observed public address only after four
+# DISTINCT peers report it (identify/obsaddr.go: ActivationThresh = 4), and the hole-punch
+# service stays dormant until then. Connecting to one bootstrap leaves DCUtR asleep on THIS
+# end even though the server side is now awake -- both peers must have it running.
+BOOTSTRAPS = [
     "/ip4/159.89.52.179/tcp/31337/p2p/QmTG981oPjsPFX5WWNegdXmkiNUgWqjUvK9spieg4hSi1h",
-)
+    "/ip4/137.184.60.251/tcp/31337/p2p/QmYECCgHhRRVTdeA9Mf3mhjiQWubgnqvbkpvL2GD6PUqdq",
+    "/ip4/143.244.144.71/tcp/31337/p2p/QmWniG4aH2XHifkRDfjbEomWWTeMHja3DtSWrXURDM6ed4",
+    "/ip4/104.248.51.133/tcp/31337/p2p/QmbeoRPB8ERB8D5FCtwxBBBRfTRhChqNewCvZ8PGMXYiF9",
+]
 MODEL = "JackFram/llama-160m"
-PREFIX = "llama-160m-hf"
+PREFIX = os.environ.get("SEEDMESH_PREFIX", "fourpeer")
 HIDDEN_BYTES = 768 * 4  # fp32 on the wire
 
 # Capture the daemon's own log lines; hivemind forwards them to this logger.
@@ -66,8 +72,8 @@ class PunchCollector(logging.Handler):
 
 logging.getLogger("hivemind").addHandler(PunchCollector())
 
-print(f"connecting to {BOOTSTRAP}\n")
-dht = DHT(initial_peers=[BOOTSTRAP], client_mode=True, start=True)
+print(f"connecting to {len(BOOTSTRAPS)} bootstrap peers\n")
+dht = DHT(initial_peers=BOOTSTRAPS, client_mode=True, start=True)
 
 print("=== servers announced in the DHT ===")
 infos = get_remote_module_infos(dht, [f"{PREFIX}.{i}" for i in range(12)], latest=True)
@@ -87,7 +93,7 @@ if not servers:
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 model = AutoDistributedModelForCausalLM.from_pretrained(
-    MODEL, initial_peers=[BOOTSTRAP], dht_prefix=PREFIX,
+    MODEL, initial_peers=BOOTSTRAPS, dht_prefix=PREFIX,
     torch_dtype=torch.float32, request_timeout=10, max_retries=1,
 )
 ids = tokenizer("What is the capital of France", return_tensors="pt")["input_ids"]
@@ -160,6 +166,11 @@ for max_new in (1, 8, 32):
           f"median={median}")
 
 report_connections("after the sweep")
+
+print("\n=== did DCUtR start on THIS end? ===")
+started = [e for e in punch_events if "Starting holepunch protocol" in e]
+print(f"  {'YES' if started else 'NO -- still waiting for a public address'}")
+print("  (the server side started it within 15s once it had four observers)")
 
 print("\n=== hole-punch / DCUtR events seen ===")
 if punch_events:
