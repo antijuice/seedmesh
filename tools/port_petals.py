@@ -464,6 +464,19 @@ def main() -> int:
     write = not args.check
     print(f"{'checking' if args.check else 'porting'} {root}\n")
 
+    try:
+        importlib.import_module("hivemind")
+    except ImportError:
+        # Distinguish "hivemind changed" from "hivemind is missing" -- they look identical
+        # in the mapping report but have completely different fixes, and the wall of
+        # "No module named 'hivemind'" lines that results is actively misleading.
+        print("hivemind is not installed, so the symbol mapping cannot be verified.")
+        print("The port rewrites imports to canonical hivemind paths and refuses to do so")
+        print("blind. Install dependencies first:")
+        print("    pip install 'hivemind==1.1.12' 'transformers>=4.48' torch")
+        print("  or let `seedmesh setup` do it in the right order.")
+        return 2
+
     problems = verify_mapping()
     if problems:
         print("hivemind mapping is stale -- refusing to rewrite imports:")

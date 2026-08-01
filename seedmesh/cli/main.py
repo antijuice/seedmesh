@@ -218,6 +218,11 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--petals-dir", default=None)
     setup.add_argument("--skip-install", action="store_true")
     setup.add_argument("--force", action="store_true", help="continue despite platform warnings")
+    setup.add_argument(
+        "--cpu-torch",
+        action="store_true",
+        help="install CPU-only torch even if a GPU is present (default: auto-detect)",
+    )
 
     probe = subparsers.add_parser("probe", help="what can this machine host?")
     probe.add_argument("--model", default=DEFAULT_MODEL)

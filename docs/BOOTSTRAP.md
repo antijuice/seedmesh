@@ -44,13 +44,22 @@ python3 -m venv ~/.venv && ~/.venv/bin/pip install -e .
 ~/.venv/bin/seedmesh setup
 ```
 
-`setup` installs and patches the backend. On a 1 GB box the torch download is the slow part;
-if it runs out of memory, add swap:
+`setup` clones Petals, installs dependencies, applies the Seedmesh port, and verifies it —
+in that order, and the order matters: the codemod checks its symbol mapping against the
+*installed* hivemind, so it cannot run before the install. Run it from the checkout, since
+that is where `tools/port_petals.py` lives.
+
+Seeing no GPU, it installs **CPU-only torch** (a few hundred MB rather than ~2.5 GB of CUDA
+wheels a bootstrap peer would never use). Pass `--cpu-torch` to force that on a machine that
+does have a GPU. The download is still the slow part; on a 1 GB box, add swap first:
 
 ```bash
 sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
 sudo mkswap /swapfile && sudo swapon /swapfile
 ```
+
+A successful run ends with `7/7 checks passed` and `ready.` — anything else means stop and
+read the output rather than continuing to the next step.
 
 ## Open the port
 
@@ -66,7 +75,9 @@ common reason a bootstrap "starts fine" and nobody can reach it.
 
 ## Start it
 
-A bootstrap peer hosts no blocks — `--num-blocks 0`:
+A bootstrap peer hosts no blocks — `--num-blocks 0`. That is a real, tested configuration:
+the server announces itself, reserves 0 GiB of attention cache and downloads no weights (it
+still reads the model's `config.json`, so the model name must be one it can fetch).
 
 ```bash
 ~/.venv/bin/seedmesh serve \

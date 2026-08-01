@@ -73,6 +73,101 @@ def test_chat_requires_peers_at_runtime_not_parse_time(parser):
 def test_setup_flags(parser):
     args = parser.parse_args(["setup", "--skip-install", "--force"])
     assert args.skip_install and args.force
+    assert args.cpu_torch is False, "auto-detect by default; the flag only forces CPU wheels"
+
+
+# ---- setup step ordering ----------------------------------------------------
+#
+# This is a regression guard, not a unit test. `setup` once ran the codemod before
+# installing anything, and the codemod verifies its symbol mapping against the *installed*
+# hivemind -- so a volunteer's first command failed with a wall of "No module named
+# 'hivemind'". The bug is invisible on any developer machine that already has the deps,
+# which is exactly why it shipped.
+
+
+class _RecordingRun:
+    """Stand-in for setup.run that records commands instead of executing them."""
+
+    def __init__(self):
+        self.commands: list[list[str]] = []
+
+    def __call__(self, command, *, check=True):
+        import subprocess
+
+        self.commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="OK  fake\n", stderr="")
+
+    def index_of(self, needle: str) -> int:
+        for position, command in enumerate(self.commands):
+            if any(needle in part for part in command):
+                return position
+        raise AssertionError(f"no command containing {needle!r} in {self.commands}")
+
+
+@pytest.fixture
+def recorded_setup(tmp_path, monkeypatch):
+    from seedmesh.cli import setup as setup_module
+
+    recorder = _RecordingRun()
+    monkeypatch.setattr(setup_module, "run", recorder)
+    monkeypatch.setattr(setup_module, "has_nvidia_gpu", lambda: False)
+    # The real gate refuses to run on Windows, where most of this project is developed.
+    # Ordering is platform-independent, so the test should be too.
+    monkeypatch.setattr(setup_module, "check_platform", lambda: [])
+    # Pretend the checkout is already there so the test needs no network.
+    checkout = tmp_path / "petals"
+    (checkout / ".git").mkdir(parents=True)
+    return recorder, checkout
+
+
+def _setup_args(parser, checkout, *extra):
+    args = parser.parse_args(["setup", "--petals-dir", str(checkout), *extra])
+    return args
+
+
+def test_setup_installs_dependencies_before_running_the_codemod(parser, recorded_setup):
+    from seedmesh.cli.setup import cmd_setup
+
+    recorder, checkout = recorded_setup
+    assert cmd_setup(_setup_args(parser, checkout)) == 0
+
+    assert recorder.index_of("hivemind==1.1.12") < recorder.index_of("port_petals.py"), (
+        "the codemod imports hivemind to verify its mapping, so it cannot run first"
+    )
+
+
+def test_setup_without_a_gpu_uses_cpu_torch_wheels(parser, recorded_setup):
+    """A bootstrap peer hosts no blocks; CUDA torch is ~2.5 GiB it will never use, and
+    enough to OOM the 1 GB VPS the guide recommends."""
+    from seedmesh.cli.setup import CPU_TORCH_INDEX, cmd_setup
+
+    recorder, checkout = recorded_setup
+    assert cmd_setup(_setup_args(parser, checkout)) == 0
+
+    torch_command = recorder.commands[recorder.index_of("torch")]
+    assert CPU_TORCH_INDEX in torch_command
+
+
+def test_setup_uses_cuda_torch_when_a_gpu_is_present(parser, recorded_setup, monkeypatch):
+    from seedmesh.cli import setup as setup_module
+
+    recorder, checkout = recorded_setup
+    monkeypatch.setattr(setup_module, "has_nvidia_gpu", lambda: True)
+    assert setup_module.cmd_setup(_setup_args(parser, checkout)) == 0
+
+    torch_command = recorder.commands[recorder.index_of("torch")]
+    assert setup_module.CPU_TORCH_INDEX not in torch_command
+
+
+def test_setup_cpu_torch_flag_overrides_a_present_gpu(parser, recorded_setup, monkeypatch):
+    from seedmesh.cli import setup as setup_module
+
+    recorder, checkout = recorded_setup
+    monkeypatch.setattr(setup_module, "has_nvidia_gpu", lambda: True)
+    assert setup_module.cmd_setup(_setup_args(parser, checkout, "--cpu-torch")) == 0
+
+    torch_command = recorder.commands[recorder.index_of("torch")]
+    assert setup_module.CPU_TORCH_INDEX in torch_command
 
 
 def test_simulate_still_works_without_a_backend(parser):

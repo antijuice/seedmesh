@@ -23,7 +23,6 @@ DEFAULT_DIR = Path.home() / ".seedmesh" / "petals"
 # ones a --no-deps install skips. cpufeature is not optional on x86_64: lm_head.py guards
 # its import on platform.machine(), not on the package being present.
 RUNTIME_DEPS = [
-    "torch",
     "transformers>=4.48",
     "accelerate",
     "bitsandbytes",
@@ -37,6 +36,19 @@ RUNTIME_DEPS = [
     "requests",
     "tensor_parallel==1.0.23",
 ]
+
+CPU_TORCH_INDEX = "https://download.pytorch.org/whl/cpu"
+
+
+def has_nvidia_gpu() -> bool:
+    import shutil
+
+    if not shutil.which("nvidia-smi"):
+        return False
+    try:
+        return subprocess.run(["nvidia-smi", "-L"], capture_output=True, timeout=15).returncode == 0
+    except Exception:
+        return False
 
 
 def run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
@@ -82,23 +94,39 @@ def cmd_setup(args) -> int:
         target.parent.mkdir(parents=True, exist_ok=True)
         run(["git", "clone", "--depth", "1", PETALS_REPO, str(target)])
 
-    print("\n[2/4] applying the Seedmesh port")
+    # Dependencies BEFORE the port: the codemod verifies its symbol mapping against the
+    # *installed* hivemind before rewriting anything, so it cannot run until hivemind
+    # exists. (An earlier version patched first and failed with a wall of
+    # "No module named 'hivemind'".)
+    if args.skip_install:
+        print("\n[2/4] skipping dependency install (--skip-install)")
+    else:
+        cpu_only = args.cpu_torch or not has_nvidia_gpu()
+        print(f"\n[2/4] installing dependencies (the slow part; "
+              f"{'CPU-only torch' if cpu_only else 'CUDA torch'})")
+        if cpu_only:
+            # A bootstrap peer hosts no blocks and a CUDA torch is ~2.5 GiB of wheels it
+            # will never use -- enough to OOM a 1 GiB VPS during install.
+            print("  no NVIDIA GPU detected; using CPU torch wheels (--cpu-torch to force)")
+            run([sys.executable, "-m", "pip", "install", "--quiet",
+                 "torch", "--index-url", CPU_TORCH_INDEX])
+        else:
+            run([sys.executable, "-m", "pip", "install", "--quiet", "torch"])
+        run([sys.executable, "-m", "pip", "install", "--quiet", *RUNTIME_DEPS])
+
+    print("\n[3/4] applying the Seedmesh port")
     port_script = Path(__file__).resolve().parents[2] / "tools" / "port_petals.py"
     if not port_script.exists():
         print(f"  cannot find {port_script}; run this from a Seedmesh checkout")
         return 2
     result = run([sys.executable, str(port_script), "--petals-root", str(target)], check=False)
-    print("    " + "\n    ".join(result.stdout.strip().splitlines()[-8:]))
+    print("    " + "\n    ".join(result.stdout.strip().splitlines()[-9:]))
     if result.returncode != 0:
         print("  port failed -- see output above")
         return 1
 
-    if args.skip_install:
-        print("\n[3/4] skipping dependency install (--skip-install)")
-    else:
-        print("\n[3/4] installing dependencies (this is the slow part)")
-        run([sys.executable, "-m", "pip", "install", "--quiet", *RUNTIME_DEPS])
-        print("  installing the patched Petals (no deps -- its pins are the thing we patched)")
+    if not args.skip_install:
+        print("  installing the patched Petals (no deps -- its pins are what we patched)")
         run([sys.executable, "-m", "pip", "install", "--quiet", "--no-deps", "-e", str(target)])
 
     print("\n[4/4] verifying")
