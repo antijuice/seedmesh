@@ -30,12 +30,43 @@ constrained inbound ports, which is the opposite of what a stable rendezvous nee
 
 ## Provision
 
-Ubuntu 24.04, smallest size. Then:
+Ubuntu 24.04, smallest size.
+
+Do all the root-level work **first, as root**. The `seedmesh` service account is created
+with `--disabled-password`, which means it has no password to type — so `sudo` from that
+account can never succeed. Swap and the firewall have to be in place before you drop into
+it. (Don't "fix" this by giving the account a password and sudo rights: a passwordless,
+non-privileged account is the point. It runs a daemon exposed to the internet.)
 
 ```bash
 ssh root@YOUR_IP
 
 apt update && apt install -y python3-venv python3-pip git
+```
+
+**Swap, before anything downloads torch.** A 1 GB box OOMs during the install without it,
+and the `fstab` line is what makes it survive a reboot:
+
+```bash
+fallocate -l 2G /swapfile && chmod 600 /swapfile
+mkswap /swapfile && swapon /swapfile
+grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+free -h        # confirm a non-zero Swap row
+```
+
+**Firewall.** Allow SSH *before* enabling, or you lock yourself out of the box.
+`--force` skips the "may disrupt existing ssh connections" prompt:
+
+```bash
+ufw allow OpenSSH
+ufw allow 31337/tcp
+ufw --force enable
+ufw status     # confirm both rules are listed
+```
+
+Now create the unprivileged account and install as that user:
+
+```bash
 adduser --disabled-password --gecos "" seedmesh
 su - seedmesh
 
@@ -51,27 +82,17 @@ that is where `tools/port_petals.py` lives.
 
 Seeing no GPU, it installs **CPU-only torch** (a few hundred MB rather than ~2.5 GB of CUDA
 wheels a bootstrap peer would never use). Pass `--cpu-torch` to force that on a machine that
-does have a GPU. The download is still the slow part; on a 1 GB box, add swap first:
-
-```bash
-sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
-sudo mkswap /swapfile && sudo swapon /swapfile
-```
+does have a GPU. The download is still the slow part — this is what the swap above is for.
 
 A successful run ends with `7/7 checks passed` and `ready.` — anything else means stop and
 read the output rather than continuing to the next step.
 
-## Open the port
+## The provider firewall is a separate thing
 
-```bash
-sudo ufw allow 31337/tcp
-sudo ufw allow OpenSSH
-sudo ufw enable
-```
-
-If your provider has its own firewall (Hetzner, Oracle and AWS all do, and Oracle's is
-**on by default and blocks everything**), open 31337/tcp there too. This is the single most
-common reason a bootstrap "starts fine" and nobody can reach it.
+`ufw` above only configures the firewall *inside* the machine. If your provider has its own
+(Hetzner, Oracle and AWS all do, and Oracle's is **on by default and blocks everything**),
+open 31337/tcp there too, in their web console. This is the single most common reason a
+bootstrap "starts fine" and nobody can reach it.
 
 ## Start it
 
