@@ -56,7 +56,7 @@ BOOTSTRAPS = [
     "/ip4/104.248.51.133/tcp/31337/p2p/QmbeoRPB8ERB8D5FCtwxBBBRfTRhChqNewCvZ8PGMXYiF9",
 ]
 MODEL = "JackFram/llama-160m"
-PREFIX = os.environ.get("SEEDMESH_PREFIX", "fourpeer")
+PREFIX = os.environ.get("SEEDMESH_PREFIX", "llama-160m-hf")  # server uses the default
 HIDDEN_BYTES = 768 * 4  # fp32 on the wire
 
 # Capture the daemon's own log lines; hivemind forwards them to this logger.
