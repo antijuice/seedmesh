@@ -22,9 +22,15 @@ Seedmesh builds the missing half.
 > **Status: pre-alpha. There is no public swarm.** The trust layer is built and tested, and
 > a *private* swarm now runs real inference through it end to end — discovery, routing,
 > per-server execution, and sampler-driven verification — see
-> [docs/petals-port.md](docs/petals-port.md). As of 2026-08-01 that swarm spans **two real
-> hosts on the public internet** — a VPS bootstrap peer and a laptop behind home NAT — with
-> a client routing to the NAT'd server and getting coherent tokens back.
+> [docs/petals-port.md](docs/petals-port.md). As of 2026-08-01 that swarm spans **four
+> bootstrap peers, a laptop behind home NAT, and a client on Google Colab** — full-size
+> requests, direct connections, no relay, 36/36 successful.
+>
+> Getting there turned up a requirement worth stating plainly: **a swarm needs at least four
+> publicly reachable peers.** go-libp2p accepts a host's own public address only after four
+> distinct peers report it, and below that every NAT'd volunteer silently degrades to a relay
+> that is severed after 128 KiB — fine for a toy model, fatal for a real one. With one
+> bootstrap, a 117 KB request failed 15/15; with four, 12/12.
 >
 > What that does not mean: no public network exists; inference has run only on CPU, at 160M
 > parameters, with one server. Verification thresholds are measured across five real GPU
@@ -63,11 +69,15 @@ traceback after the download.
 To run or join a swarm, see **[docs/QUICKSTART.md](docs/QUICKSTART.md)**:
 
 ```bash
-seedmesh setup                                        # install + patch the backend
-seedmesh serve --model <m> --initial-peers <addr>     # donate compute
-seedmesh chat  --model <m> --initial-peers <addr>     # use the swarm
-seedmesh simulate                                     # adversarial scenarios, no backend
+seedmesh setup       # install + patch the backend
+seedmesh serve       # donate compute
+seedmesh chat        # use the swarm
+seedmesh simulate    # adversarial scenarios, no backend
 ```
+
+`serve` and `chat` take no arguments: bootstrap peers and the model come from the packaged
+`seedmesh/swarm.json`. Point elsewhere with `--swarm-file`, or override with
+`--initial-peers`.
 
 `simulate` runs three scenarios end to end — healthy, mixed-threat, and a sybil fleet — and
 prints calibrated thresholds, detection outcomes and load distribution.

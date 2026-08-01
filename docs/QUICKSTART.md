@@ -78,48 +78,60 @@ not run on current transformers, hivemind or numpy without it. Details in
 
 ## 3. Join a swarm
 
-Ask whoever runs the swarm for its **bootstrap address**. It looks like:
-
-```
-/ip4/203.0.113.10/tcp/31337/p2p/QmXh3hVojQEJ72bP1ZCe4UTMLSD9Cje9KF7SDjeT5cQjh7
+```bash
+seedmesh serve
 ```
 
-Then:
+That is the whole command. The bootstrap peers and the model come from `seedmesh/swarm.json`,
+which ships with the package, so there is nothing to paste. Block count is auto-sized from
+your GPU; override with `--num-blocks N` to donate less.
+
+To join a *different* swarm, point at its definition:
 
 ```bash
-seedmesh serve --model JackFram/llama-160m --initial-peers <that address> --public-name "your-name"
+seedmesh serve --swarm-file ./their-swarm.json
 ```
 
-Block count is auto-sized from your GPU. Override with `--num-blocks N` if you want to
-donate less.
+or pass addresses directly with `--initial-peers`, which overrides everything else.
 
 ## 4. Use a swarm
 
 ```bash
-seedmesh chat --model JackFram/llama-160m --initial-peers <that address>
+seedmesh chat
 ```
+
+Same story — no arguments. It waits out the routing warm-up (a few minutes after a server
+starts, its blocks reach the DHT before its address does) rather than failing your first
+prompt, and retries a stalled request with a fresh session instead of hanging.
 
 ## 5. Run your own swarm
 
-Someone needs a **publicly reachable** machine. This is the part people underestimate:
-neither a home PC behind NAT nor a Colab notebook can be dialled from outside, so a swarm of
-those alone cannot form. A cheap VPS (~$5/month, **no GPU needed** — a bootstrap peer only
-relays discovery metadata) is the usual answer.
+You need **at least four publicly reachable peers**. This is not a redundancy
+recommendation — it is a hard requirement of go-libp2p, and getting it wrong fails in a way
+that looks like everything is fine.
 
-On the VPS:
+go-libp2p accepts an observed public address for itself only once **four distinct peers**
+have independently reported it (`identify/obsaddr.go`, `ActivationThresh = 4`). Below four, a
+volunteer behind NAT never learns its own public address, so it advertises nothing dialable,
+so every connection falls back to a circuit relay — and go-libp2p resets a relayed connection
+after **128 KiB**, which is less than one request of any real model.
 
-```bash
-seedmesh bootstrap --port 31337 --announce-ip <the VPS's public IPv4>
+Measured on this swarm: with one bootstrap peer, a 117 KB request failed **15/15**. With
+four, the same request from a Colab client on the other side of the internet succeeded
+**12/12**, directly, with no relay involved.
+
+Stand up four cheap VPSs (~$5/month each, no GPU) following
+[BOOTSTRAP.md](BOOTSTRAP.md), then list all four in your own `swarm.json`:
+
+```json
+{
+  "name": "your-swarm",
+  "model": "JackFram/llama-160m",
+  "bootstrap_peers": ["/ip4/.../tcp/31337/p2p/Qm...", "...", "...", "..."]
+}
 ```
 
-A bootstrap peer is a DHT node, not a server with zero blocks — it takes no `--model`, and
-one bootstrap serves any swarm. (`serve --num-blocks 0` crashes inside Petals about a minute
-in, after looking healthy; it now refuses up front and points here.)
-
-It prints a `/ip4/.../tcp/31337/p2p/Qm...` address. That is what everyone else passes to
-`--initial-peers`. Open port 31337.
-
-Everyone else then runs step 3 or 4 against it.
+Hand that file to your volunteers, or set `SEEDMESH_SWARM=/path/to/swarm.json`.
 
 ## Troubleshooting
 
@@ -148,19 +160,25 @@ swarm: a NAT'd laptop showed `ONLINE` with all 12 blocks and was unreachable at 
 then served the identical query ~5 minutes later with nothing changed. Wait and retry. If it
 persists past ~10 minutes, see [NAT-AND-RELAYS.md](NAT-AND-RELAYS.md).
 
-**`TimeoutError`, then `AssertionError('0 and 37')` mid-generation** — a step exceeded the
-request timeout, and Petals' recovery path is broken: `_update_sequence()` copies `history`
-into the replacement server session but leaves its `_position` at 0, so the next step
-asserts. Raise `--timeout` (default 180s, matching Petals). Relayed peers stall
-occasionally; a stall that fits inside the timeout is invisible, one that exceeds it becomes
-this crash. **Known limitation:** if a server genuinely dies mid-generation, that request is
-lost — recovery does not resume. Start a new prompt.
+**A prompt takes an extra second and prints `(attempt 1 stalled, retrying)`** — working as
+intended. `chat` uses a short 10s per-attempt timeout and retries with a *fresh* session,
+because a stalled request never recovers on its own; a long timeout only delays the retry
+that works. Tune with `--timeout` / `--attempts`.
+
+**Known limitation: a server dying mid-generation loses that request.** Petals' own recovery
+path is broken (`_update_sequence()` copies `history` into the replacement session but leaves
+its `_position` at 0, so the next step asserts `0 and N`). Seedmesh sets `max_retries=1` to
+keep Petals off that path and retries a level up instead, but an in-flight request cannot be
+resumed. Send the prompt again.
 
 **`No GPU detected and --num-blocks not given`** — `probe` found no CUDA device. You can
 still use a swarm as a client.
 
-**Server starts, then nobody can reach it** — you are behind NAT. Either forward the port,
-or join an existing swarm rather than hosting the bootstrap.
+**Server starts, then nobody can reach it** — count your bootstrap peers first. Fewer than
+four and your machine never learns its own public address, so it advertises nothing dialable.
+That is the cause far more often than the router is. If you do have four and it still fails,
+your NAT is probably symmetric or you are behind CGNAT; forward the port. See
+[NAT-AND-RELAYS.md](NAT-AND-RELAYS.md).
 
 **Out of memory shortly after starting** — the auto-size reserve is a heuristic, not a
 measurement. Re-run with a lower `--num-blocks`.

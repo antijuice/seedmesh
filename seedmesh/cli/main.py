@@ -252,11 +252,16 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         "--num_blocks", str(num_blocks),
         "--quant_type", args.quant,
     ]
-    if args.initial_peers:
-        command += ["--initial_peers", *args.initial_peers]
+    from seedmesh.cli.swarm import resolve_peers
+
+    peers, note = resolve_peers(args.initial_peers, args.swarm_file)
+    if note:
+        print(note)
+    if peers:
+        command += ["--initial_peers", *peers]
     else:
         command += ["--new_swarm"]
-        print("no --initial-peers given: starting a NEW private swarm")
+        print("no bootstrap peers found: starting a NEW private swarm")
     if args.device:
         command += ["--device", args.device]
     if args.public_name:
@@ -339,8 +344,15 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
         print("no --announce-ip given: the peer will advertise whatever address it sees "
               "locally,\n  which on most VPSs is a private one nobody can dial.\n")
 
-    if args.initial_peers:
-        command += ["--initial_peers", *args.initial_peers]
+    from seedmesh.cli.swarm import resolve_peers
+
+    peers, note = resolve_peers(args.initial_peers, args.swarm_file)
+    if note:
+        print(note, flush=True)
+    if peers:
+        # Without this a new bootstrap starts its OWN isolated DHT and everything looks
+        # healthy while nobody can see anyone.
+        command += ["--initial_peers", *peers]
 
     # A stable peer id matters more here than anywhere else: the address is the thing every
     # volunteer has pasted into their own command line.
@@ -562,9 +574,14 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         print(f"backend present but not importable ({exc}). Re-run `seedmesh setup`.")
         return 2
 
-    peers = list(args.initial_peers or [])
+    from seedmesh.cli.swarm import resolve_peers
+
+    peers, note = resolve_peers(args.initial_peers, args.swarm_file)
+    if note:
+        print(note)
     if not peers:
-        print("--initial-peers is required (ask whoever runs the swarm for the address).")
+        print("no bootstrap peers. Either pass --initial-peers, or point --swarm-file at a")
+        print("swarm definition. Ask whoever runs the swarm for its addresses.")
         return 2
 
     _quiet_hivemind_finalizers()
@@ -672,6 +689,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="default: auto-size")
     serve.add_argument("--quant", choices=["none", "int8", "nf4"], default="nf4")
     serve.add_argument("--initial-peers", "--initial_peers", nargs="+", default=None)
+    serve.add_argument("--swarm-file", "--swarm_file", default=None,
+                      help="JSON swarm definition (default: the packaged one)")
     serve.add_argument("--device", default=None)
     serve.add_argument("--public-name", "--public_name", default=None,
                        help="shown on the leaderboard")
@@ -703,6 +722,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--initial-peers", "--initial_peers", nargs="+", default=None,
         help="join an existing DHT (for running a second bootstrap); omit to start a new one",
     )
+    bootstrap.add_argument("--swarm-file", "--swarm_file", default=None,
+                           help="JSON swarm definition to join (default: the packaged one)")
     bootstrap.add_argument(
         "--identity-path", "--identity_path",
         default=str(Path.home() / ".seedmesh" / "bootstrap.key"),
@@ -718,6 +739,8 @@ def build_parser() -> argparse.ArgumentParser:
     chat = subparsers.add_parser("chat", help="talk to a swarm")
     chat.add_argument("--model", default=DEFAULT_MODEL)
     chat.add_argument("--initial-peers", "--initial_peers", nargs="+", default=None)
+    chat.add_argument("--swarm-file", "--swarm_file", default=None,
+                      help="JSON swarm definition (default: the packaged one)")
     chat.add_argument("--max-new-tokens", "--max_new_tokens", type=int, default=32)
     chat.add_argument("--timeout", type=float, default=CHAT_REQUEST_TIMEOUT,
                       help="per-attempt timeout in seconds")

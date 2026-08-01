@@ -50,7 +50,7 @@ Documentation = "https://github.com/seedmesh/seedmesh/tree/main/docs"
 include = ["seedmesh*"]
 
 [tool.setuptools.package-data]
-seedmesh = ["models/*.yaml"]
+seedmesh = ["models/*.yaml", "swarm.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,11 @@
+{
+  "name": "seedmesh-alpha",
+  "model": "JackFram/llama-160m",
+  "_comment": "Bootstrap peers for the default swarm. FOUR OR MORE IS NOT COSMETIC: go-libp2p only accepts an observed public address after four distinct peers report it (identify/obsaddr.go, ActivationThresh = 4). Below that a NAT'd host never learns its own public address, never advertises anything dialable, and every connection falls back to a circuit relay -- which go-libp2p resets after 128 KiB, breaking any real model. See docs/NAT-AND-RELAYS.md.",
+  "bootstrap_peers": [
+    "/ip4/159.89.52.179/tcp/31337/p2p/QmTG981oPjsPFX5WWNegdXmkiNUgWqjUvK9spieg4hSi1h",
+    "/ip4/137.184.60.251/tcp/31337/p2p/QmYECCgHhRRVTdeA9Mf3mhjiQWubgnqvbkpvL2GD6PUqdq",
+    "/ip4/143.244.144.71/tcp/31337/p2p/QmWniG4aH2XHifkRDfjbEomWWTeMHja3DtSWrXURDM6ed4",
+    "/ip4/104.248.51.133/tcp/31337/p2p/QmbeoRPB8ERB8D5FCtwxBBBRfTRhChqNewCvZ8PGMXYiF9"
+  ]
+}

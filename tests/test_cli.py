@@ -522,3 +522,67 @@ def test_the_user_is_told_why_it_is_waiting():
     wait_until_routable(probe, timeout=100, interval=0,
                         notify=lambda n, remaining: seen.append(n))
     assert seen, "silently hanging for three minutes is indistinguishable from a freeze"
+
+
+# ---- swarm definition --------------------------------------------------------
+#
+# `seedmesh serve` with no arguments has to work, or this is a tutorial rather than a
+# command. The peer list also has a hard floor: go-libp2p accepts an observed public address
+# only after FOUR distinct peers report it (identify/obsaddr.go, ActivationThresh = 4).
+# Below four, a NAT'd host never learns its own public address, advertises nothing dialable,
+# and every connection degrades to a relay that is cut off at 128 KiB. Measured, not guessed.
+
+
+def test_packaged_swarm_has_at_least_four_peers():
+    from seedmesh.cli.swarm import MIN_BOOTSTRAP_PEERS, load_swarm
+
+    swarm = load_swarm()
+    assert swarm is not None, "the packaged swarm.json should exist"
+    assert len(swarm.bootstrap_peers) >= MIN_BOOTSTRAP_PEERS
+    assert all(p.startswith("/ip4/") and "/p2p/" in p for p in swarm.bootstrap_peers)
+
+
+def test_explicit_peers_win_over_the_swarm_file():
+    from seedmesh.cli.swarm import resolve_peers
+
+    peers, note = resolve_peers(["/ip4/1.2.3.4/tcp/1/p2p/Qm"], None)
+    assert peers == ["/ip4/1.2.3.4/tcp/1/p2p/Qm"]
+    assert note is None, "the explicit path should be quiet"
+
+
+def test_swarm_file_supplies_peers_when_none_given():
+    from seedmesh.cli.swarm import resolve_peers
+
+    peers, note = resolve_peers(None, None)
+    assert len(peers) >= 4
+    assert "seedmesh-alpha" in note
+
+
+def test_too_few_peers_warns_loudly(tmp_path):
+    """Silently degrading to a 128 KiB relay is the worst possible failure here."""
+    import json
+
+    from seedmesh.cli.swarm import resolve_peers
+
+    thin = tmp_path / "thin.json"
+    thin.write_text(json.dumps({
+        "name": "thin", "model": "m",
+        "bootstrap_peers": ["/ip4/1.2.3.4/tcp/1/p2p/Qm"],
+    }))
+    peers, note = resolve_peers(None, str(thin))
+    assert len(peers) == 1
+    assert "WARNING" in note and "128 KiB" in note
+
+
+def test_a_missing_swarm_file_is_reported_not_ignored(tmp_path):
+    from seedmesh.cli.swarm import resolve_peers
+
+    peers, note = resolve_peers(None, str(tmp_path / "nope.json"))
+    assert peers == []
+    assert "no swarm file" in note
+
+
+def test_serve_and_chat_accept_a_swarm_file(parser):
+    for sub in ("serve", "chat"):
+        args = parser.parse_args([sub, "--swarm-file", "/tmp/x.json"])
+        assert args.swarm_file == "/tmp/x.json"

@@ -41,14 +41,19 @@ dishonest one. A relayed volunteer is not penalised as though they were faulty.
 
 ## If you *can* forward a port
 
-Better, but not required:
+Better, but not required — and needed only if your NAT is symmetric or you are behind CGNAT.
+Pin the port so there is something stable to forward:
 
 ```bash
-seedmesh serve --model <m> --initial-peers <addr> \
-  -- --public_ip YOUR_PUBLIC_IP --port 31337
+seedmesh serve --host-maddrs /ip4/0.0.0.0/tcp/31338
 ```
 
-Forward 31337/tcp to your machine in your router. You will then see `accessible directly`.
+Forward 31338/tcp to your machine in your router. Bootstrap peers come from the packaged
+`swarm.json`, so there is nothing else to pass.
+
+Note the ordering: **count your bootstrap peers before touching the router.** With fewer than
+four, no port forward helps, because the host never learns the public address it would need
+to advertise.
 
 ## Troubleshooting
 
