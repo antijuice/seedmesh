@@ -346,3 +346,14 @@ def test_an_unrecognised_error_is_reported_verbatim_not_swallowed():
 
     message = explain_inference_failure(ValueError("something else entirely"))
     assert "ValueError" in message and "something else entirely" in message
+
+
+def test_chat_does_not_tighten_the_upstream_request_timeout(parser):
+    """Regression: --timeout defaulted to 60s, a third of Petals' own 180s. On a real
+    relayed swarm a step exceeded 60s, the request timed out, and Petals' retry path then
+    raised AssertionError('0 and 37') rebuilding a server session at position 0 while the
+    client was mid-generation. Tightening upstream's timeout turned slow into crashed."""
+    from seedmesh.cli.main import CHAT_REQUEST_TIMEOUT
+
+    assert CHAT_REQUEST_TIMEOUT == 180, "must match petals ClientConfig.request_timeout"
+    assert parser.parse_args(["chat"]).timeout == CHAT_REQUEST_TIMEOUT

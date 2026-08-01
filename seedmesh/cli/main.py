@@ -25,6 +25,14 @@ from seedmesh import __version__
 
 DEFAULT_MODEL = "JackFram/llama-160m"
 
+# Match Petals' own ClientConfig.request_timeout (3 * 60). An earlier value of 60s was a
+# self-inflicted failure: a relayed step on a real NAT'd swarm took longer than that, the
+# request timed out, and Petals' retry path then blew up with
+# AssertionError('0 and 37') because it rebuilds a server session at position 0 while the
+# client is mid-generation. Tightening upstream's timeout without measuring the slow path
+# turned a slow request into a crash.
+CHAT_REQUEST_TIMEOUT = 3 * 60
+
 
 # ---- simulate ---------------------------------------------------------------
 
@@ -444,6 +452,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     # docs/petals-port.md.
     dht = DHT(initial_peers=peers, client_mode=True, start=True)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
+    # max_retries is bounded on purpose -- Petals defaults to retrying forever, which in a
+    # small swarm means hanging instead of reporting. request_timeout is NOT tightened:
+    # see CHAT_REQUEST_TIMEOUT.
     model = AutoDistributedModelForCausalLM.from_pretrained(
         args.model, initial_peers=peers, torch_dtype=torch.float32,
         request_timeout=args.timeout, max_retries=3,
@@ -554,7 +565,8 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--model", default=DEFAULT_MODEL)
     chat.add_argument("--initial-peers", "--initial_peers", nargs="+", default=None)
     chat.add_argument("--max-new-tokens", "--max_new_tokens", type=int, default=32)
-    chat.add_argument("--timeout", type=float, default=60.0)
+    chat.add_argument("--timeout", type=float, default=CHAT_REQUEST_TIMEOUT,
+                      help="per-request timeout in seconds; relayed peers are slow")
 
     simulate = subparsers.add_parser(
         "simulate", help="run trust-layer scenarios against the swarm simulator"

@@ -148,6 +148,14 @@ swarm: a NAT'd laptop showed `ONLINE` with all 12 blocks and was unreachable at 
 then served the identical query ~5 minutes later with nothing changed. Wait and retry. If it
 persists past ~10 minutes, see [NAT-AND-RELAYS.md](NAT-AND-RELAYS.md).
 
+**`TimeoutError`, then `AssertionError('0 and 37')` mid-generation** — a step exceeded the
+request timeout, and Petals' recovery path is broken: `_update_sequence()` copies `history`
+into the replacement server session but leaves its `_position` at 0, so the next step
+asserts. Raise `--timeout` (default 180s, matching Petals). Relayed peers stall
+occasionally; a stall that fits inside the timeout is invisible, one that exceeds it becomes
+this crash. **Known limitation:** if a server genuinely dies mid-generation, that request is
+lost — recovery does not resume. Start a new prompt.
+
 **`No GPU detected and --num-blocks not given`** — `probe` found no CUDA device. You can
 still use a swarm as a client.
 
