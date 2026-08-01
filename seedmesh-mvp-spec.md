@@ -409,7 +409,11 @@ pragmatic option because it is Apache-2.0 *and* within the existing transformers
 - `seedmesh probe` sizes block count analytically from a model config and `nvidia-smi`,
   needing **neither torch nor a weight download**: a volunteer can size a 70B model before
   committing to any traffic. Uses the bytes/param constants measured in the quantization
-  spike. Real result: 30 of Qwen3-8B's 36 blocks on a 4GB laptop GPU at NF4.
+  spike. Real result: 27 of Llama-3.1-8B's 32 blocks on a 4GB laptop GPU at NF4.
+  **[CORRECTED 2026-08-01]** This example previously read "30 of Qwen3-8B's 36 blocks". The
+  arithmetic was right but the model was unservable: Petals implements only `llama`,
+  `mixtral`, `falcon` and `bloom`, so `probe` was confidently sizing a model that `serve`
+  could never load. `probe` now refuses unsupported architectures instead of sizing them.
 - `seedmesh serve` auto-sizes and wraps the Petals server; `seedmesh chat` is a client.
 - `docs/QUICKSTART.md` is the volunteer-facing entry point, including an explicit
   "what does not work yet" section.

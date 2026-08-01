@@ -61,7 +61,14 @@ def _cmd_simulate(args: argparse.Namespace) -> int:
 
 
 def _cmd_probe(args: argparse.Namespace) -> int:
-    from seedmesh.cli.hardware import describe_plan, detect_gpus, fetch_config, plan_blocks
+    from seedmesh.cli.hardware import (
+        UnsupportedModelError,
+        check_model_supported,
+        describe_plan,
+        detect_gpus,
+        fetch_config,
+        plan_blocks,
+    )
 
     print(f"seedmesh {__version__}  |  python {sys.version.split()[0]} on {sys.platform}\n")
 
@@ -85,6 +92,14 @@ def _cmd_probe(args: argparse.Namespace) -> int:
         print(f"\ncannot size {args.model}:\n  {exc}")
         return 1
 
+    # Before sizing, not after: a block plan for an architecture Petals cannot load is
+    # a confidently wrong answer.
+    try:
+        check_model_supported(config, args.model)
+    except UnsupportedModelError as exc:
+        print(f"\n{exc}")
+        return 1
+
     print()
     for gpu in gpus:
         for quant in (args.quant,) if args.quant else ("nf4", "int8", "none"):
@@ -105,7 +120,29 @@ def _cmd_probe(args: argparse.Namespace) -> int:
 
 def _cmd_serve(args: argparse.Namespace) -> int:
     """Wrap Petals' server with auto-sizing and friendlier defaults."""
-    from seedmesh.cli.hardware import detect_gpus, fetch_config, plan_blocks
+    from seedmesh.cli.hardware import (
+        UnsupportedModelError,
+        check_model_supported,
+        detect_gpus,
+        fetch_config,
+        plan_blocks,
+    )
+
+    # Architecture check before launching anything. Petals downloads config.json and only
+    # then raises "Petals does not support model type qwen3" from the bottom of a traceback.
+    # One HTTP request turns that into a sentence. A *failed* fetch is deliberately not
+    # fatal -- the server fetches too and will report the real problem itself.
+    config = None
+    try:
+        config = fetch_config(args.model)
+    except Exception as exc:
+        print(f"note: could not pre-check {args.model} ({exc}); letting the server try\n")
+    else:
+        try:
+            check_model_supported(config, args.model)
+        except UnsupportedModelError as exc:
+            print(exc)
+            return 2
 
     num_blocks = args.num_blocks
     if num_blocks is None:
@@ -114,10 +151,9 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             print("No GPU detected and --num-blocks not given; refusing to guess.")
             print("Pass --num-blocks explicitly, or run `seedmesh probe` first.")
             return 2
-        try:
-            config = fetch_config(args.model)
-        except Exception as exc:
-            print(f"could not size automatically ({exc}); pass --num-blocks")
+        if config is None:
+            print("could not fetch the model config, so auto-sizing is impossible; "
+                  "pass --num-blocks")
             return 2
         plan = plan_blocks(config, gpus[0], quant=args.quant, model_name=args.model)
         num_blocks = max(1, plan.recommended_blocks)

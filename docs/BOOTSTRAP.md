@@ -102,7 +102,7 @@ still reads the model's `config.json`, so the model name must be one it can fetc
 
 ```bash
 ~/.venv/bin/seedmesh serve \
-  --model Qwen/Qwen3-8B \
+  --model JackFram/llama-160m \
   --num-blocks 0 \
   --host-maddrs /ip4/0.0.0.0/tcp/31337 \
   -- --announce_maddrs /ip4/YOUR_PUBLIC_IP/tcp/31337
@@ -136,7 +136,7 @@ After=network-online.target
 [Service]
 User=seedmesh
 WorkingDirectory=/home/seedmesh/seedmesh
-ExecStart=/home/seedmesh/.venv/bin/seedmesh serve --model Qwen/Qwen3-8B --num-blocks 0 \
+ExecStart=/home/seedmesh/.venv/bin/seedmesh serve --model JackFram/llama-160m --num-blocks 0 \
   --host-maddrs /ip4/0.0.0.0/tcp/31337 -- --announce_maddrs /ip4/YOUR_PUBLIC_IP/tcp/31337
 Restart=always
 RestartSec=10
@@ -156,7 +156,7 @@ From your own machine, not the VPS:
 
 ```bash
 nc -vz YOUR_PUBLIC_IP 31337        # should connect
-seedmesh chat --model Qwen/Qwen3-8B --initial-peers <the address>
+seedmesh chat --model JackFram/llama-160m --initial-peers <the address>
 ```
 
 If `nc` fails, it is the firewall — provider-level before OS-level, in that order of
@@ -167,7 +167,7 @@ likelihood.
 Nothing special. Behind NAT is fine for *them*:
 
 ```bash
-seedmesh serve --model Qwen/Qwen3-8B \
+seedmesh serve --model JackFram/llama-160m \
   --initial-peers /ip4/YOUR_IP/tcp/31337/p2p/Qm... \
   --public-name "alice"
 ```

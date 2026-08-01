@@ -45,12 +45,17 @@ seedmesh/
 Try it:
 
 ```bash
-pip install -e . && seedmesh probe --model Qwen/Qwen3-8B
+pip install -e . && seedmesh probe --model NousResearch/Meta-Llama-3.1-8B-Instruct
 ```
 
 `probe` needs no GPU-side install and no weight download — it reads the model config and
-your hardware and tells you what you could host. On a 4 GB laptop GPU that is 30 of an 8B
-model's 36 blocks at NF4.
+your hardware and tells you what you could host. On a 4 GB laptop GPU that is 27 of
+Llama-3.1-8B's 32 blocks at NF4.
+
+**Petals implements four architectures: `llama`, `mixtral`, `falcon`, `bloom`.** That is a
+code limit, not a licence one — Qwen, Gemma and Phi are refused however open their weights
+are. `probe` and `serve` now check this up front rather than letting you discover it from a
+traceback after the download.
 
 To run or join a swarm, see **[docs/QUICKSTART.md](docs/QUICKSTART.md)**:
 

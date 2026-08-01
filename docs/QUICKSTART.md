@@ -23,7 +23,7 @@ does, which is why `seedmesh probe` and `seedmesh simulate` work anywhere.
 ```bash
 git clone <this repo> seedmesh && cd seedmesh
 pip install -e .
-seedmesh probe --model Qwen/Qwen3-8B
+seedmesh probe --model NousResearch/Meta-Llama-3.1-8B-Instruct
 ```
 
 `probe` needs no backend and no downloads — it reads the model's config and your GPU, and
@@ -33,10 +33,35 @@ tells you what you could host:
 GPU 0: NVIDIA GeForce RTX 3050 Laptop GPU  4.0 GiB (3.9 GiB free, compute 8.6)
 
 [nf4]
-  model             Qwen/Qwen3-8B (36 blocks)
-  per block         192.9M params, 95 MiB
-  recommendation    30 blocks (83% of the model)
+  model             NousResearch/Meta-Llama-3.1-8B-Instruct (32 blocks)
+  quantization      nf4 (0.516 bytes/param)
+  per block         218.1M params, 107 MiB
+  usable VRAM       2.9 GiB (after reserve)
+  recommendation    27 blocks (84% of the model)
 ```
+
+## Choosing a model
+
+**Petals implements four architectures — `llama`, `mixtral`, `falcon`, `bloom` — and
+nothing else.** This is an architecture limit, not a licensing one: Qwen, Gemma, Phi and
+dense Mistral are all refused no matter how permissive their weights. `probe` and `serve`
+check before doing any work; a model outside the list fails with one sentence rather than a
+traceback from inside the server.
+
+Two verified-reachable, ungated options:
+
+| model | arch | blocks | use |
+| --- | --- | --- | --- |
+| `JackFram/llama-160m` | llama | 12 | first connectivity test — seconds to download, runs on CPU |
+| `NousResearch/Meta-Llama-3.1-8B-Instruct` | llama | 32 | a real swarm |
+
+`meta-llama/*` and `google/gemma-*` are **gated** — anonymous fetches are refused, so every
+volunteer would need a Hugging Face account and accepted licence terms. The `NousResearch`
+mirror is the same Llama 3.1 weights without that friction.
+
+**Everyone in a swarm must use the same model string.** It determines the DHT prefix, so a
+peer on a different model silently joins a different swarm and sees nobody. Prove the network
+works on `llama-160m` first, then have everyone restart on the larger model together.
 
 ## 2. Install the backend (hosting only)
 
@@ -62,7 +87,7 @@ Ask whoever runs the swarm for its **bootstrap address**. It looks like:
 Then:
 
 ```bash
-seedmesh serve --model Qwen/Qwen3-8B --initial-peers <that address> --public-name "your-name"
+seedmesh serve --model JackFram/llama-160m --initial-peers <that address> --public-name "your-name"
 ```
 
 Block count is auto-sized from your GPU. Override with `--num-blocks N` if you want to
@@ -71,7 +96,7 @@ donate less.
 ## 4. Use a swarm
 
 ```bash
-seedmesh chat --model Qwen/Qwen3-8B --initial-peers <that address>
+seedmesh chat --model JackFram/llama-160m --initial-peers <that address>
 ```
 
 ## 5. Run your own swarm
@@ -84,7 +109,7 @@ relays discovery metadata) is the usual answer.
 On the VPS:
 
 ```bash
-seedmesh serve --model Qwen/Qwen3-8B --num-blocks 0 \
+seedmesh serve --model JackFram/llama-160m --num-blocks 0 \
   --host-maddrs /ip4/0.0.0.0/tcp/31337
 ```
 
@@ -100,6 +125,18 @@ Everyone else then runs step 3 or 4 against it.
 
 **`<model> is gated`** — the model needs a Hugging Face account and accepted licence terms.
 Prefer permissively-licensed models; see `seedmesh/models/registry.yaml`.
+
+**`Petals has no block implementation for model type X`** — the architecture is unsupported.
+Only `llama`, `mixtral`, `falcon` and `bloom` exist; see *Choosing a model* above. If you get
+the raw form of this, `ValueError: Petals does not support model type X` from inside a
+traceback, you are on an older checkout that pre-dates the up-front check.
+
+**`could not reach huggingface.co`** — usually transient. Hugging Face resets anonymous
+connections under load; `probe` and `serve` already retry three times, so a persistent
+failure is more likely a real network problem than a bad model name.
+
+**Connected, but the swarm looks empty** — check every peer is using the *identical* model
+string. It sets the DHT prefix, so a mismatch puts people in separate swarms with no error.
 
 **`No GPU detected and --num-blocks not given`** — `probe` found no CUDA device. You can
 still use a swarm as a client.

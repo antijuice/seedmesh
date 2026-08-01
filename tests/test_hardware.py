@@ -12,7 +12,10 @@ import pytest
 
 from seedmesh.cli.hardware import (
     BYTES_PER_PARAM,
+    SUPPORTED_MODEL_TYPES,
     GpuInfo,
+    UnsupportedModelError,
+    check_model_supported,
     describe_plan,
     params_per_block,
     plan_blocks,
@@ -117,3 +120,47 @@ def test_4gb_card_sizing_matches_the_quantization_spike():
     plan = plan_blocks(BIG, gpu(4), quant="nf4")
     # The spike reserved a flat 1 GiB; this reserves max(1 GiB, 15%), so expect >= 20.
     assert 20 <= plan.recommended_blocks <= 32
+
+
+# ---- supported architectures ------------------------------------------------
+#
+# A volunteer was told to serve Qwen3-8B. `probe` sized it happily and reported a block
+# plan; the server then downloaded config.json and died with "Petals does not support model
+# type qwen3" at the bottom of a traceback. Sizing a model that can never be loaded is a
+# confidently wrong answer, which is worse than no answer.
+
+
+@pytest.mark.parametrize("model_type", SUPPORTED_MODEL_TYPES)
+def test_every_architecture_petals_ships_is_accepted(model_type):
+    assert check_model_supported({**BIG, "model_type": model_type}) == model_type
+
+
+def test_the_list_matches_what_the_ported_petals_registers():
+    """Measured from petals.utils.auto_config._CLASS_MAPPING on the patched checkout.
+    If Petals gains an architecture, this is the assertion that should fail first."""
+    assert set(SUPPORTED_MODEL_TYPES) == {"bloom", "falcon", "llama", "mixtral"}
+
+
+def test_qwen3_is_rejected_by_name():
+    with pytest.raises(UnsupportedModelError) as exc:
+        check_model_supported({**BIG, "model_type": "qwen3"}, "Qwen/Qwen3-8B")
+    message = str(exc.value)
+    assert "Qwen/Qwen3-8B" in message and "qwen3" in message
+    assert "llama" in message, "must name a working alternative, not just refuse"
+
+
+def test_rejection_does_not_blame_licensing():
+    """The failure is architectural. Someone reading 'unsupported' next to an open-weights
+    model will otherwise go hunting for a licence or an HF token."""
+    with pytest.raises(UnsupportedModelError) as exc:
+        check_model_supported({**BIG, "model_type": "gemma2"}, "google/gemma-2-9b")
+    assert "architecture" in str(exc.value).lower()
+
+
+def test_model_type_is_matched_case_insensitively():
+    assert check_model_supported({**BIG, "model_type": "LlaMA"}) == "llama"
+
+
+def test_a_config_with_no_model_type_is_rejected_not_assumed():
+    with pytest.raises(UnsupportedModelError):
+        check_model_supported(dict(BIG), "mystery/model")

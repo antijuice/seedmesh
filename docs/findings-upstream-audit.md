@@ -52,6 +52,16 @@ separate from whatever else is installed.
 **The launch model catalog is blocked behind a port.** Qwen3 and Llama 4 need
 `transformers>=4.51`. Petals pins 4.43.1.
 
+> **Corrected 2026-08-01, from a real `run_server` failure.** The transformers pin was only
+> half the story, and stating it alone implied that lifting the pin would unlock Qwen3. It
+> does not. Petals dispatches on `config.model_type` through a registry populated by
+> `petals/models/`, which contains exactly four subpackages — **bloom, falcon, llama,
+> mixtral**. Anything else raises `ValueError: Petals does not support model type X` after
+> downloading `config.json`, on any transformers version. Adding an architecture means
+> writing a block implementation, not bumping a dependency. Measured by enumerating
+> `petals.utils.auto_config._CLASS_MAPPING` on the ported checkout; `seedmesh probe` and
+> `serve` now check this before doing any work.
+
 ## 3. "Modernized model catalog = mostly config" is not correct
 
 > **Corrected 2026-07-31 by the port spike.** This section originally claimed

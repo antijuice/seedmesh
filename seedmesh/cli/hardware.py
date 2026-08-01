@@ -165,41 +165,93 @@ def plan_blocks(
     )
 
 
+# Petals ships block wrappers for exactly these architectures -- petals/models/ has one
+# subpackage each, and AutoDistributedConfig raises "Petals does not support model type X"
+# for anything else. Verified against the registry the ported checkout actually populates,
+# not against upstream docs.
+#
+# This list is here rather than imported from petals on purpose: `probe` must run on a
+# machine with no backend installed at all, which is most of its value.
+SUPPORTED_MODEL_TYPES = ("bloom", "falcon", "llama", "mixtral")
+
+
+class UnsupportedModelError(Exception):
+    """The model's architecture has no Petals block implementation."""
+
+
+def check_model_supported(config: dict, model_name: str = "") -> str:
+    """Return the model_type, or explain why this model can never be served.
+
+    Worth checking early and separately from sizing: `probe` will happily compute a block
+    plan for any config.json with the right numeric fields, and reporting "you can host 30
+    of 36 blocks" for an architecture Petals cannot load is worse than saying nothing.
+    """
+    model_type = str(config.get("model_type", "")).lower()
+    if model_type in SUPPORTED_MODEL_TYPES:
+        return model_type
+
+    label = model_name or config.get("_name_or_path", "this model")
+    described = f"model type {model_type!r}" if model_type else "an unrecognised model type"
+    raise UnsupportedModelError(
+        f"{label} is {described}, which Petals has no block implementation for.\n"
+        f"  Supported: {', '.join(SUPPORTED_MODEL_TYPES)}.\n"
+        f"  Note this is an *architecture* limit, not a licence one -- Qwen, Gemma, Phi and\n"
+        f"  Mistral-dense all fail here regardless of how open their weights are.\n"
+        f"  Llama-architecture models are the safe default; see docs/QUICKSTART.md."
+    )
+
+
 class ConfigFetchError(Exception):
     """Raised with an explanation a volunteer can act on."""
 
 
-def fetch_config(model_name: str) -> dict:
+CONFIG_FETCH_ATTEMPTS = 3
+
+
+def fetch_config(model_name: str, *, attempts: int = CONFIG_FETCH_ATTEMPTS) -> dict:
     """Fetch a model's config.json without downloading weights.
 
-    Failure modes are translated rather than surfaced raw: a gated repository closes the
-    connection or 401s, which as a bare URLError reads like a broken network and sends
-    someone debugging the wrong thing.
+    Retries on connection-level failures. Measured: fetching ten configs in a row, three
+    ungated repos reset the connection on the first try and succeeded on the second. A
+    one-shot fetch reports those as unreachable, which a volunteer reads as "this model is
+    unavailable" when it is simply rate limiting.
+
+    HTTP failures are translated rather than surfaced raw -- a gated repo 401s, which as a
+    bare HTTPError sends someone debugging the wrong thing -- but are *not* retried, since
+    401/404 will not change on a second attempt.
     """
+    import time
     import urllib.error
     import urllib.request
 
     url = f"https://huggingface.co/{model_name}/resolve/main/config.json"
     request = urllib.request.Request(url, headers={"User-Agent": "seedmesh-probe"})
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        if exc.code in (401, 403):
-            raise ConfigFetchError(
-                f"{model_name} is gated -- it needs a Hugging Face account and accepted "
-                f"licence terms.\n  Seedmesh prefers unambiguously permissive models; see "
-                f"seedmesh/models/registry.yaml."
-            ) from exc
-        if exc.code == 404:
-            raise ConfigFetchError(f"no model named {model_name} on Hugging Face") from exc
-        raise ConfigFetchError(f"HTTP {exc.code} fetching {model_name}") from exc
-    except urllib.error.URLError as exc:
-        raise ConfigFetchError(
-            f"could not reach huggingface.co ({exc.reason}).\n"
-            f"  If {model_name} is a gated repo, that is the likely cause rather than your "
-            f"network -- gated repos often drop the connection for anonymous requests."
-        ) from exc
+
+    last_reason = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise ConfigFetchError(
+                    f"{model_name} is gated -- it needs a Hugging Face account and accepted "
+                    f"licence terms.\n  Seedmesh prefers unambiguously permissive models; see "
+                    f"seedmesh/models/registry.yaml."
+                ) from exc
+            if exc.code == 404:
+                raise ConfigFetchError(f"no model named {model_name} on Hugging Face") from exc
+            raise ConfigFetchError(f"HTTP {exc.code} fetching {model_name}") from exc
+        except urllib.error.URLError as exc:
+            last_reason = exc.reason
+            if attempt < attempts:
+                time.sleep(attempt)  # 1s, then 2s
+
+    raise ConfigFetchError(
+        f"could not reach huggingface.co after {attempts} attempts ({last_reason}).\n"
+        f"  Hugging Face resets anonymous connections under load, so this is often "
+        f"transient -- try again before assuming {model_name} is unavailable."
+    )
 
 
 def describe_plan(plan: BlockPlan, gpu: GpuInfo) -> list[str]:
