@@ -257,7 +257,27 @@ a real swarm, and the constants they justify need re-deriving once one exists.
 
 ## 7. What is not built
 
-* No backend adapter — no real inference runs yet.
-* No DHT integration — records are designed for it, not yet published to it.
-* No gateway, monitor, or onboarding wizard.
+Corrected 2026-08-02 — three of the four items previously listed here were done and this
+section had not kept up.
+
+**Built since:** the Petals backend adapter (real inference across real hosts), DHT
+integration (signed reputation records published, fetched and verified over the live swarm),
+and `seedmesh monitor` with a public HTML view.
+
+**Genuinely not built:**
+
+* **No gateway.** Using the swarm means running the CLI.
+* **No onboarding wizard.** `seedmesh setup` plus a Quickstart, not a guided flow.
+* **No real model catalog.** `models/registry.yaml` is a stub; the swarm file names the
+  models a given swarm uses.
+* **No inline verification during real inference.** The verification layer works and is
+  driven end to end in `tools/backend_demo.py`, but a serving client does not yet sample its
+  own requests. This is the largest gap between the design and what actually runs.
+* **Servers do not gossip.** They receive requests rather than routing them, so they form no
+  opinion about anyone. Reputation is entirely client-side.
+* **Reputation does not steer routing.** Measured, shared, and deliberately not yet acted on;
+  a bias strong enough to avoid a faulty server is also strong enough to strand an honest
+  slow one.
+* **MoE verification cannot distinguish an expert swap from a fault** — see
+  [findings-moe.md](findings-moe.md).
 * No training or fine-tuning (a spec non-goal).

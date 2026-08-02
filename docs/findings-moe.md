@@ -273,7 +273,7 @@ churn. That is a community, not a data centre — which is the point.
 | | work | status |
 | --- | --- | --- |
 | 1 | Port `WrappedMixtralBlock` | **done** — patch 9, all probe steps pass |
-| 1b | Calibrate MoE tolerances | **blocked** — needs trained weights; random gates cannot answer it |
+| 1b | Calibrate MoE tolerances | **unblocked 2026-08-02** — answered on a 70 MB trained MoE; see below |
 | 2 | Add `petals/models/deepseek_v3/` | **done** — patch 13, probe passes |
 | 3 | Map `kimi_k2` → `deepseek_v3` | **done** — patch 14 |
 | 4 | Fix `attn_cache_tokens` for MLA | **done** — patch 11; it under-reserved, not over |
@@ -282,3 +282,61 @@ churn. That is a community, not a data centre — which is the point.
 
 Nothing here needs a new transport, a fork, or a protocol change. The hard networking problem
 was the relay budget, and that is solved.
+
+## Both open questions, answered with trained weights (2026-08-02)
+
+They were blocked on the same thing, and `routing_sensitivity.py` said so in its own
+docstring: a random gate cannot answer either, because routing flips depend on how often two
+experts are nearly **tied**, which is a property of training.
+
+Mixtral-8x7B is ~87 GB. **`ggml-org/stories15M_MOE` is 70 MB**, declares
+`model_type: mixtral`, and is genuinely trained. Both questions became laptop-sized.
+`spike/moe/trained_weights.py`.
+
+### Q1: the ~50% NaN rate is a random-init artifact, not a port bug
+
+**36/36 finite** across 12 seeds x 3 sequence lengths, plus real token embeddings. So the
+earlier finding stands as a warning about *probes*, not about the port: untrained expert
+weights are badly conditioned in a way trained ones are not.
+
+A bonus regression check fell out of it. Loading the real layer's `state_dict` into
+`WrappedMixtralBlock` succeeded with **no missing trained parameters and no unexpected
+ones** — which is exactly the property that lets Petals load real MoE checkpoints, and it had
+never been tested against a real one.
+
+### Q2: honest noise rarely flips routing — but "rarely" is not "never"
+
+| | |
+| --- | --- |
+| bf16 round-trip | 1.48e-3 relative input noise |
+| routing flips observed at bf16 | **0 / 256 tokens** |
+| routing first flips under swept noise | ~1e-2, about **7x** a bf16 round-trip |
+| decision margin (top-k vs first rejected) | min 1.35e-4, p5 5.1e-3, median 4.1e-2 |
+| tokens with margin *below* the bf16 noise floor | **8 / 256 (3.1%)** |
+
+The last two rows are the ones that matter, and they corrected a conclusion this file nearly
+recorded. "Zero flips observed" invites "honest noise never changes routing" — but the
+**minimum margin is smaller than the bf16 noise floor**. No flips occurred because a random
+perturbation direction rarely moves a score gap, not because it cannot. The observed rate (0%)
+is a lower bound and the margin-based rate (3.1%) an upper one; the truth sits between and
+depends on direction.
+
+### What that means for verification
+
+The median token sits 28x the noise floor from the boundary, so MoE verification is not
+fundamentally broken — but a small tail means **two honest servers will occasionally route a
+token differently**.
+
+The right response is not a wider distance tolerance. One wide enough to absorb an expert
+swap would detect nothing at all. It is to treat a routing difference as **INCONCLUSIVE** —
+the verdict the verification layer already has for "the test could not decide" — rather than
+as MISMATCH.
+
+**Still open, and now sharper:** a client sees only output hidden states, so it cannot
+currently *distinguish* an expert swap from a genuine fault. Until it can, a flipped token
+looks like a mismatch. That is a verification-layer design question, not a porting one.
+
+**Caveat.** A 15M router trained on children's stories is not a 47B router trained on the
+open internet, and flip frequency is precisely the quantity that depends on the router. These
+numbers bound the mechanism; a real MoE swarm still needs tolerances measured on the model it
+serves.
