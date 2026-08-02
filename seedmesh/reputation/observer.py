@@ -49,6 +49,7 @@ from typing import Any, Callable, Optional
 from seedmesh.core.clock import Clock, SystemClock
 from seedmesh.core.types import BlockRange, Observation, Outcome, PeerId
 from seedmesh.reputation.scorer import ReputationScorer
+from seedmesh.verification.inline import is_prefill
 
 # The server-side exception class name, as it survives serialisation into the client's error
 # text. Kept as a constant so `tools/verify_petals_port.py` can check for the same string.
@@ -108,6 +109,11 @@ class InferenceObserver:
         self.clock: Clock = clock or SystemClock()
         self.stats = ObserverStats()
         self.subjects: set[PeerId] = set()
+
+        # Set by ClientReputation when inline verification is enabled. Absent by default so
+        # the observer stays useful on its own -- measuring is worth doing even where there
+        # is no second server to check against.
+        self.verifier = None
 
     def note(
         self,
@@ -200,6 +206,9 @@ def attach(session_class: type, observer: InferenceObserver, *, method: str = "s
             return original(self, *args, **kwargs)
         subject, start, end = span
         tokens = _token_count(args, kwargs)
+        # Read BEFORE the call: step() advances the session's position, so afterwards a
+        # prefill step is indistinguishable from a decode step.
+        prefill = observer.verifier is not None and is_prefill(self)
         began = time.perf_counter()
         try:
             result = original(self, *args, **kwargs)
@@ -209,6 +218,14 @@ def attach(session_class: type, observer: InferenceObserver, *, method: str = "s
             raise
         elapsed_ms = (time.perf_counter() - began) * 1000.0
         _safely(observer.note, subject, start, end, Outcome.OK, elapsed_ms, tokens=tokens)
+        if prefill:
+            # Capture only. The replay happens between prompts -- double-routing inline
+            # would double the user's latency to check a fraction of requests.
+            _safely(
+                observer.verifier.capture,
+                subject, start, end, observer.model_id,
+                args[0] if args else kwargs.get("inputs"), result,
+            )
         return result
 
     wrapper._seedmesh_observed = True  # type: ignore[attr-defined]

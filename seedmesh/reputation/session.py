@@ -96,9 +96,30 @@ class ClientReputation:
 
         self._last_sync = 0.0
         self._detach: Optional[Callable[[], None]] = None
+        self.verifier = None
 
     def _cluster_of(self, peer_id: str) -> str:
         return self._clusters.get(peer_id, UNKNOWN_CLUSTER)
+
+    def enable_verification(self, *, run_on, discover, clusters=None, config=None) -> None:
+        """Turn on inline verification: sample real requests, re-check them elsewhere.
+
+        Kept separate from the constructor because it is the one part that needs a live
+        Petals client. Reputation without it is still worth having -- latency and success
+        are real signals -- but only this answers whether the numbers were *correct*, which
+        is the property the whole project is for.
+        """
+        from seedmesh.reputation.diversity import ClusterIndex
+        from seedmesh.verification.inline import InlineVerifier
+        from seedmesh.verification.sampler import SamplerConfig, VerificationSampler
+
+        sampler = VerificationSampler(
+            self.scorer,
+            clusters or ClusterIndex(),
+            config or SamplerConfig(),
+        )
+        self.verifier = InlineVerifier(sampler, run_on=run_on, discover=discover)
+        self.observer.verifier = self.verifier
 
     # ---- lifecycle ---------------------------------------------------------------
 
@@ -131,6 +152,7 @@ class ClientReputation:
     def close(self) -> tuple[bool, int]:
         """Final publish and save. Returns ``(saved, accepted)``."""
         self.detach()
+        self.run_verification()
         accepted = 0
         try:
             _, accepted = self.gossip.sync()
@@ -154,12 +176,24 @@ class ClientReputation:
         if not force and not self.due_for_sync():
             return None
         self._last_sync = self.clock.now()
+        # Verification before gossip, so a verdict reached this round is published this
+        # round rather than sitting locally until the next one.
+        self.run_verification()
         try:
             _, accepted = self.gossip.sync()
         except Exception:
             return None
         self.save()
         return accepted
+
+    def run_verification(self, limit: int = 1) -> list:
+        """Replay a sampled request against a second server. Never raises into the caller."""
+        if self.verifier is None:
+            return []
+        try:
+            return self.verifier.run_pending(limit=limit)
+        except Exception:
+            return []
 
     # ---- reporting ---------------------------------------------------------------
 
@@ -168,6 +202,8 @@ class ClientReputation:
         if self.loaded:
             lines.append(f"  recalled {self.loaded} peer(s) from previous sessions")
         lines.extend(self.observer.describe())
+        if self.verifier is not None:
+            lines.extend(self.verifier.describe())
         lines.extend(self.gossip.describe())
         heard = sorted(self.aggregator.subjects())
         if heard:

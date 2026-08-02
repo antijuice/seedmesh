@@ -659,6 +659,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     reputation = None
     if not args.no_reputation:
         try:
+            args._model_object = model
             reputation = _start_reputation(args, dht, peers)
         except Exception as exc:
             print(f"  (reputation disabled: {type(exc).__name__}: {exc})")
@@ -742,7 +743,41 @@ def _start_reputation(args: argparse.Namespace, dht, peers):
         print(f"created this node's signing identity (...{identity.peer_id[-8:]})")
     if reputation.loaded:
         print(f"recalled reputation for {reputation.loaded} peer(s) from {state}")
+
+    if not args.no_verify:
+        _enable_verification(reputation, args, dht)
     return reputation
+
+
+def _enable_verification(reputation, args: argparse.Namespace, dht) -> None:
+    """Let the client check its own requests against a second, independent server.
+
+    Best-effort: a client that cannot verify is still a useful client, and the reasons it
+    might not (one server per block range, no resolvable addresses, an older Petals) are
+    ordinary swarm conditions rather than errors. But they are printed, because a silent
+    "no verification happened" is indistinguishable from "everything checked out".
+    """
+    from seedmesh.verification.petals_bridge import (
+        make_address_resolver,
+        make_discover,
+        make_runner,
+        sequence_manager_of,
+    )
+
+    model = getattr(args, "_model_object", None)
+    manager = sequence_manager_of(model) if model is not None else None
+    if manager is None:
+        print("  (verification off: could not reach the client's routing table)")
+        return
+
+    block_uids = list(manager.block_uids)
+    discover = make_discover(
+        dht, block_uids, args.model, addresses=make_address_resolver(manager)
+    )
+    reputation.enable_verification(
+        run_on=make_runner(manager, block_uids), discover=discover
+    )
+    print("  verification on: a sample of requests will be re-checked on a second server")
 
 
 # ---- parser -----------------------------------------------------------------
@@ -867,6 +902,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="retries with a fresh session when a request stalls")
     chat.add_argument("--no-reputation", "--no_reputation", action="store_true",
                       help="do not measure servers, and do not publish or fetch reputation")
+    chat.add_argument("--no-verify", "--no_verify", action="store_true",
+                      help="measure servers but do not re-check their work on a second one")
     chat.add_argument("--gossip-interval", "--gossip_interval", type=float,
                       default=DEFAULT_SYNC_INTERVAL_S,
                       help="seconds between reputation publish/fetch rounds")

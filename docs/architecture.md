@@ -270,9 +270,20 @@ and `seedmesh monitor` with a public HTML view.
 * **No onboarding wizard.** `seedmesh setup` plus a Quickstart, not a guided flow.
 * **No real model catalog.** `models/registry.yaml` is a stub; the swarm file names the
   models a given swarm uses.
-* **No inline verification during real inference.** The verification layer works and is
-  driven end to end in `tools/backend_demo.py`, but a serving client does not yet sample its
-  own requests. This is the largest gap between the design and what actually runs.
+* ~~No inline verification during real inference.~~ **Built 2026-08-02.** `seedmesh chat`
+  samples its own requests and re-runs them on a second server. Two constraints shape it,
+  both discovered by running it:
+
+  * **Only prefill steps are replayable.** Petals inference is stateful, so replaying a
+    decode step compares a computation that had KV history against one that did not, and
+    honest servers would read as mismatched. The prefill step runs against an empty cache
+    and is definitionally equivalent to a stateless forward.
+  * **A relayed peer cannot be placed on a network.** A circuit multiaddr carries the
+    *relay's* IP, not the peer's. Measured live: both servers resolved to bootstrap-droplet
+    IPs. Trusting that would let one operator's two NAT'd servers, relayed through different
+    droplets, verify each other. Relay-only peers are therefore left unlocated and refused
+    as verification partners — so **verification currently reports "skipped" on this swarm**,
+    which is correct, and starts working when servers are directly reachable.
 * **Servers do not gossip.** They receive requests rather than routing them, so they form no
   opinion about anyone. Reputation is entirely client-side.
 * **Reputation does not steer routing.** Measured, shared, and deliberately not yet acted on;
