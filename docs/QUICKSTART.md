@@ -60,8 +60,21 @@ volunteer would need a Hugging Face account and accepted licence terms. The `Nou
 mirror is the same Llama 3.1 weights without that friction.
 
 **Everyone in a swarm must use the same model string.** It determines the DHT prefix, so a
-peer on a different model silently joins a different swarm and sees nobody. Prove the network
-works on `llama-160m` first, then have everyone restart on the larger model together.
+peer on a different model silently joins a different swarm and sees nobody. That is why the
+model lives in `swarm.json` -- the file you hand people -- rather than in each person's
+command line:
+
+```json
+{ "name": "your-swarm", "model": "NousResearch/Meta-Llama-3.1-8B-Instruct", "bootstrap_peers": [...] }
+```
+
+`--model` still overrides it when you want to test something. Prove the network works on
+`llama-160m` first, then change the file and have everyone restart together.
+
+**Switching models needs no change to the bootstrap peers.** They run `run_dht`, which is
+model-agnostic — one set of four droplets carries any number of swarms. Two models can even
+run at once on the same peers, since a different model means a different DHT prefix and
+therefore a separate namespace; `seedmesh monitor --model X` shows each one.
 
 ## 2. Install the backend (hosting only)
 
@@ -133,6 +146,9 @@ yet. Real output from this swarm, showing exactly that:
   ...jSUDSNRi            0-12   nf4/bf16/eager+relay   1091 tok/s  not yet measured
   hewitt                 0-12   none/bf16/eager+relay   173 tok/s  0.992 (3 obs, 1 clust)
 ```
+
+To publish this page for everyone, see [PUBLIC-MONITOR.md](PUBLIC-MONITOR.md) -- it runs on
+a bootstrap droplet with no backend installed, because monitoring only reads DHT keys.
 
 The profile column is quantisation / dtype / attention kernel. Volunteers differ here and
 that is normal -- it is why verification compares within a profile instead of treating the

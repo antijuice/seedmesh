@@ -237,3 +237,75 @@ def test_the_relay_marker_survives_the_narrow_profile_column():
     )
     assert rows[0].profile == "nf4/bf16/eager+relay"
     assert "~" not in fit(rows[0].profile, 21)
+
+
+# ---- reading a swarm without importing Petals --------------------------------
+#
+# The monitor needs two facts (block count, DHT prefix) plus the per-block records. Going
+# through AutoDistributedConfig drags in petals -> transformers -> torch: several hundred MB
+# resident to read a handful of DHT keys, on the $5/1 GiB box that is the natural home for a
+# public dashboard. Both are reimplemented -- and a wrong prefix reads an EMPTY namespace and
+# reports a healthy swarm as dead, so the rules are pinned here.
+
+
+@pytest.mark.parametrize(
+    "model, model_type, expected",
+    [
+        ("JackFram/llama-160m", "llama", "llama-160m-hf"),
+        ("NousResearch/Meta-Llama-3.1-8B-Instruct", "llama", "Meta-Llama-3-1-8B-Instruct-hf"),
+        ("some/already-hf", "llama", "already-hf"),          # suffix is not doubled
+        ("tiiuae/falcon-7b", "falcon", "falcon-7b"),         # falcon takes no -hf
+        ("bigscience/bloom-560m", "bloom", "bigscience/bloom-560m-petals"),  # full path
+        ("mistralai/Mixtral-8x7B-v0.1", "mixtral", "mistralai/Mixtral-8x7B-v0-1"),  # full path
+        ("deepseek-ai/DeepSeek-V3", "deepseek_v3", "DeepSeek-V3-hf"),
+    ],
+)
+def test_dht_prefix_matches_petals_rules(model, model_type, expected):
+    from seedmesh.cli.monitor import dht_prefix_for
+
+    assert dht_prefix_for(model, model_type) == expected
+
+
+def test_dht_prefix_agrees_with_the_installed_petals():
+    """The parametrised cases above are copied from Petals' source. This one checks the copy
+    has not drifted from the Petals actually installed -- skipped where there is none."""
+    petals_config = pytest.importorskip("petals.utils.auto_config")
+    from seedmesh.cli.monitor import dht_prefix_for
+
+    config = petals_config.AutoDistributedConfig.from_pretrained("JackFram/llama-160m")
+    assert dht_prefix_for("JackFram/llama-160m", config.model_type) == config.dht_prefix
+
+
+def test_an_announcement_decodes_without_petals():
+    from seedmesh.cli.monitor import announcement_from_tuple
+
+    # Exactly the shape ServerInfo.to_tuple produces.
+    decoded = announcement_from_tuple((2, 173.5, {"public_name": "hewitt", "quant_type": "none"}))
+    assert decoded["state"] == "ONLINE"
+    assert decoded["throughput"] == 173.5
+    assert decoded["public_name"] == "hewitt"
+
+
+def test_unknown_extra_fields_pass_through_rather_than_breaking_the_read():
+    from seedmesh.cli.monitor import announcement_from_tuple
+
+    # Petals adds fields over time; a decoder that enumerated them would break on upgrade.
+    decoded = announcement_from_tuple((2, 1.0, {"a_field_from_the_future": 42}))
+    assert decoded["a_field_from_the_future"] == 42
+
+
+def test_a_malformed_announcement_is_offline_not_an_exception():
+    from seedmesh.cli.monitor import announcement_from_tuple
+
+    # Any peer can write any bytes to a DHT key; the monitor must not be crashable by one.
+    for junk in (None, "nonsense", (), (2,), {"not": "a tuple"}):
+        assert announcement_from_tuple(junk)["state"] == "OFFLINE"
+
+
+def test_states_map_to_the_names_coverage_counting_uses():
+    from seedmesh.cli.monitor import announcement_from_tuple, count_replicas
+
+    rows = collapse_spans([{"p": announcement_from_tuple((1, 1.0, {}))}])  # JOINING
+    assert count_replicas(rows, 1) == [0]
+    rows = collapse_spans([{"p": announcement_from_tuple((2, 1.0, {}))}])  # ONLINE
+    assert count_replicas(rows, 1) == [1]

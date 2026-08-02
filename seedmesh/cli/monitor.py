@@ -393,6 +393,119 @@ def render_json(report: SwarmReport) -> str:
 # ---- live collection ---------------------------------------------------------
 
 
+def dht_prefix_for(model: str, model_type: str) -> str:
+    """Petals' DHT namespace for a model, derived without importing Petals.
+
+    Reading the swarm needs exactly two facts -- the block count and this prefix -- and both
+    live in `config.json`, which `hardware.fetch_config` pulls over plain HTTP.
+
+    Measured peak RSS for one `collect()` against the live swarm: **390 MiB with Petals
+    imported, 279 MiB without**. Less of a saving than it looks like it should be, because
+    hivemind depends on torch, so torch is resident either way -- what Petals adds on top is
+    transformers and its model registry. 111 MiB still matters on the $5/1 GiB VPS that is
+    the natural home for a public dashboard and is already running a bootstrap peer.
+
+    The bigger reason is reach, not memory: this path needs no `seedmesh setup` at all, so a
+    box provisioned only as a bootstrap peer can serve the dashboard, and `seedmesh monitor`
+    works on Windows where the backend refuses to run.
+
+    Reimplemented rather than imported, and it is genuinely per-architecture -- llama and
+    deepseek_v3 append `-hf` and keep only the repo name, falcon keeps the repo name without
+    the suffix, bloom appends `-petals` to the FULL path, and mixtral keeps the full path
+    with no suffix. Getting one wrong reads an empty namespace and reports a healthy swarm
+    as empty, so `test_monitor.py` checks every rule against the installed Petals when it is
+    present, and `collect` prefers Petals' own answer whenever it can import it.
+    """
+    if model_type == "bloom":
+        return f"{model}-petals".replace(".", "-")
+    if model_type == "mixtral":
+        return model.replace(".", "-")
+
+    prefix = model.split("/")[-1].replace(".", "-")
+    if model_type in ("llama", "deepseek_v3", "kimi_k2") and not prefix.endswith("-hf"):
+        prefix += "-hf"
+    return prefix
+
+
+def swarm_shape(model: str) -> tuple[int, str]:
+    """(block count, DHT prefix), preferring Petals' own answer when it is installed.
+
+    Petals is authoritative: if it is importable, its derivation is the one the servers
+    actually used. The config-only path exists for the machine that has no backend at all.
+    """
+    try:
+        from petals.utils.auto_config import AutoDistributedConfig
+
+        config = AutoDistributedConfig.from_pretrained(model)
+        return config.num_hidden_layers, config.dht_prefix
+    except Exception:
+        pass
+
+    from seedmesh.cli.hardware import fetch_config
+
+    config = fetch_config(model)
+    return config["num_hidden_layers"], dht_prefix_for(model, config.get("model_type", ""))
+
+
+# Petals stores one DHT record per block: key = "<prefix>.<index>", subkeys = peer ids,
+# each value the tuple `ServerInfo.to_tuple()` produces -- (state value, throughput, extras).
+SERVER_STATES = {0: "OFFLINE", 1: "JOINING", 2: "ONLINE"}
+
+
+def announcement_from_tuple(raw: Any) -> Dict[str, Any]:
+    """Decode one server's announcement without importing Petals.
+
+    Mirrors `ServerInfo.from_tuple`: everything past the first two positions is a plain dict
+    of extras, so new fields upstream arrive here automatically rather than breaking the read.
+    """
+    if not isinstance(raw, (tuple, list)) or len(raw) < 2:
+        return {"state": "OFFLINE"}
+    state, throughput = raw[0], raw[1]
+    extras = raw[2] if len(raw) > 2 and isinstance(raw[2], dict) else {}
+    return {
+        "state": SERVER_STATES.get(state, str(state)),
+        "throughput": throughput,
+        **{key: value for key, value in extras.items() if key not in ("state", "throughput")},
+    }
+
+
+def _read_blocks(dht, block_uids: List[str]) -> List[Dict[str, Any]]:
+    """Per-block ``{peer id: announcement}``.
+
+    Prefers Petals' own reader when it is installed, because it is authoritative. Falls back
+    to plain DHT reads so the monitor runs anywhere hivemind does -- including a box
+    provisioned only as a bootstrap peer, and Windows, where the backend refuses to run.
+
+    Verified against the live swarm by blocking the `petals` import and comparing the two
+    reports field by field: identical (`spike/` A/B, 2026-08-02). A wrong rule here would not
+    raise -- it would read an empty namespace and report a healthy swarm as dead -- so the
+    check is an equality test against the real thing, not a shape assertion.
+    """
+    try:
+        from petals.utils.dht import get_remote_module_infos
+
+        infos = get_remote_module_infos(dht, block_uids, latest=True)
+        return [
+            {str(peer): _server_dict(server) for peer, server in (info.servers or {}).items()}
+            for info in infos
+        ]
+    except ImportError:
+        pass
+
+    from seedmesh.reputation.dht import dht_fetch
+
+    found = dht_fetch(dht, list(block_uids))
+    per_block = []
+    for uid in block_uids:
+        entry = found.get(uid)
+        servers: Dict[str, Any] = {}
+        if isinstance(entry, dict):
+            for peer, raw in entry.items():
+                servers[str(peer)] = announcement_from_tuple(raw)
+        per_block.append(servers)
+    return per_block
+
+
 def _server_dict(server: Any) -> Dict[str, Any]:
     """Flatten Petals' ServerInfo into the plain mapping the pure functions take."""
     state = getattr(server, "state", None)
@@ -410,18 +523,9 @@ def _server_dict(server: Any) -> Dict[str, Any]:
 
 def collect(dht, model: str, prefix: str = "seedmesh") -> SwarmReport:
     """Read the swarm's announcements and everything observers have signed about it."""
-    from petals.utils.auto_config import AutoDistributedConfig
-    from petals.utils.dht import get_remote_module_infos
-
-    config = AutoDistributedConfig.from_pretrained(model)
-    n_blocks = config.num_hidden_layers
-    block_uids = [f"{config.dht_prefix}.{i}" for i in range(n_blocks)]
-
-    infos = get_remote_module_infos(dht, block_uids, latest=True)
-    per_block = [
-        {str(peer): _server_dict(server) for peer, server in (info.servers or {}).items()}
-        for info in infos
-    ]
+    n_blocks, prefix_for_blocks = swarm_shape(model)
+    block_uids = [f"{prefix_for_blocks}.{i}" for i in range(n_blocks)]
+    per_block = _read_blocks(dht, block_uids)
 
     aggregates, observers, accepted = _read_reputation(dht, prefix)
     return build_report(
@@ -469,10 +573,15 @@ def _read_reputation(dht, prefix: str = "seedmesh"):
 
 
 def cmd_monitor(args) -> int:
-    from seedmesh.cli.main import _backend_missing, _refuse_on_windows
     from seedmesh.cli.swarm import load_swarm, resolve_peers
 
-    if _refuse_on_windows("Monitoring a swarm") or _backend_missing("Monitoring a swarm"):
+    # Deliberately NOT gated on the Petals backend. Monitoring reads DHT keys; it needs
+    # hivemind and nothing else. Requiring the backend would mean a public dashboard could
+    # only run on a machine provisioned to serve, which is the opposite of the point.
+    try:
+        from hivemind.dht import DHT
+    except ImportError:
+        print("monitoring needs hivemind: pip install hivemind==1.1.12")
         return 2
 
     peers, note = resolve_peers(args.initial_peers, args.swarm_file)
@@ -491,8 +600,6 @@ def cmd_monitor(args) -> int:
             prefix = f"seedmesh/{swarm.name}"
     except Exception:
         pass
-
-    from hivemind.dht import DHT
 
     dht = DHT(initial_peers=peers, client_mode=True, start=True)
     try:
