@@ -229,3 +229,59 @@ def test_dense_models_are_unaffected():
              "num_key_value_heads": 2, "num_hidden_layers": 4}
     assert params_per_block(llama) == 139_520
     assert params_per_layer(llama, 0) == 139_520
+
+
+# ---- nvidia-smi and torch can disagree, silently and expensively -------------
+
+
+class FakeGpu:
+    name = "NVIDIA GeForce RTX 3050 Laptop GPU"
+
+
+def test_a_cpu_only_torch_build_is_named_as_the_cause(monkeypatch):
+    import types
+
+    from seedmesh.cli import hardware
+
+    fake = types.SimpleNamespace(
+        __version__="2.13.0+cpu", cuda=types.SimpleNamespace(is_available=lambda: False)
+    )
+    monkeypatch.setitem(__import__("sys").modules, "torch", fake)
+    ready, detail = hardware.torch_cuda_ready()
+    assert ready is False
+    assert "CPU-only" in detail
+
+
+def test_a_cuda_build_with_no_device_is_a_different_message(monkeypatch):
+    import types
+
+    from seedmesh.cli import hardware
+
+    fake = types.SimpleNamespace(
+        __version__="2.13.0+cu126", cuda=types.SimpleNamespace(is_available=lambda: False)
+    )
+    monkeypatch.setitem(__import__("sys").modules, "torch", fake)
+    _, detail = hardware.torch_cuda_ready()
+    # Telling someone to reinstall torch when torch is fine and the driver is not would
+    # send them down the wrong path entirely.
+    assert "cannot see a device" in detail
+    assert "CPU-only" not in detail
+
+
+def test_the_warning_fires_only_when_a_gpu_exists_but_is_unusable(monkeypatch):
+    from seedmesh.cli import hardware
+
+    monkeypatch.setattr(hardware, "torch_cuda_ready", lambda: (False, "CPU-only build"))
+    assert hardware.warn_if_gpu_unusable([]) == []  # no GPU is a separate, handled case
+    lines = hardware.warn_if_gpu_unusable([FakeGpu()])
+    assert any("WARNING" in line for line in lines)
+    # A warning without the fix is just an obstacle.
+    assert any(hardware.CUDA_TORCH_FIX in line for line in lines)
+    assert any("fall back to the CPU" in line for line in lines)
+
+
+def test_no_warning_when_torch_can_use_the_gpu(monkeypatch):
+    from seedmesh.cli import hardware
+
+    monkeypatch.setattr(hardware, "torch_cuda_ready", lambda: (True, "torch 2.13.0+cu126"))
+    assert hardware.warn_if_gpu_unusable([FakeGpu()]) == []

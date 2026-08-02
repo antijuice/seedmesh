@@ -25,7 +25,7 @@ from typing import Optional, Sequence
 
 from seedmesh import __version__
 
-DEFAULT_MODEL = "JackFram/llama-160m"
+from seedmesh.cli.swarm import DEFAULT_MODEL  # the swarm file can override it
 
 # Measured on a real relayed swarm (2026-08-01, 20 + 30 request runs against a NAT'd
 # laptop server) rather than inherited from Petals' 180s default:
@@ -98,6 +98,7 @@ def _cmd_probe(args: argparse.Namespace) -> int:
         detect_gpus,
         fetch_config,
         plan_blocks,
+        warn_if_gpu_unusable,
     )
 
     print(f"seedmesh {__version__}  |  python {sys.version.split()[0]} on {sys.platform}\n")
@@ -129,6 +130,11 @@ def _cmd_probe(args: argparse.Namespace) -> int:
     except UnsupportedModelError as exc:
         print(f"\n{exc}")
         return 1
+
+    # Said before the block plan, not after: every number below assumes the GPU is
+    # actually usable, and on a CPU-only torch build none of them apply.
+    for line in warn_if_gpu_unusable(gpus):
+        print(line)
 
     print()
     for gpu in gpus:
@@ -208,6 +214,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         detect_gpus,
         fetch_config,
         plan_blocks,
+        warn_if_gpu_unusable,
     )
 
     # Architecture check before launching anything. Petals downloads config.json and only
@@ -247,6 +254,8 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             print("could not fetch the model config, so auto-sizing is impossible; "
                   "pass --num-blocks")
             return 2
+        for line in warn_if_gpu_unusable(gpus):
+            print(line)
         plan = plan_blocks(config, gpus[0], quant=args.quant, model_name=args.model)
         num_blocks = max(1, plan.recommended_blocks)
         print(f"auto-sized to {num_blocks} block(s) on {gpus[0].name} at {args.quant}")
@@ -745,11 +754,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     probe = subparsers.add_parser("probe", help="what can this machine host?")
-    probe.add_argument("--model", default=DEFAULT_MODEL)
+    probe.add_argument("--model", default=None,
+                       help="default: whatever the swarm file names")
+    probe.add_argument("--swarm-file", "--swarm_file", default=None)
     probe.add_argument("--quant", choices=["none", "int8", "nf4"], default=None)
 
     serve = subparsers.add_parser("serve", help="host blocks for a swarm")
-    serve.add_argument("--model", default=DEFAULT_MODEL)
+    serve.add_argument("--model", default=None,
+                        help="default: whatever the swarm file names")
     serve.add_argument("--num-blocks", "--num_blocks", type=int, default=None,
                        help="default: auto-size")
     serve.add_argument("--quant", choices=["none", "int8", "nf4"], default="nf4")
@@ -814,7 +826,8 @@ def build_parser() -> argparse.ArgumentParser:
     monitor = subparsers.add_parser(
         "monitor", help="who is donating what, and is the model covered"
     )
-    monitor.add_argument("--model", default=DEFAULT_MODEL)
+    monitor.add_argument("--model", default=None,
+                        help="default: whatever the swarm file names")
     monitor.add_argument("--initial-peers", "--initial_peers", nargs="+", default=None)
     monitor.add_argument("--swarm-file", "--swarm_file", default=None)
     monitor.add_argument("--watch", type=float, default=0.0,
@@ -824,7 +837,8 @@ def build_parser() -> argparse.ArgumentParser:
     monitor.add_argument("--json", action="store_true", help="machine-readable output")
 
     chat = subparsers.add_parser("chat", help="talk to a swarm")
-    chat.add_argument("--model", default=DEFAULT_MODEL)
+    chat.add_argument("--model", default=None,
+                        help="default: whatever the swarm file names")
     chat.add_argument("--initial-peers", "--initial_peers", nargs="+", default=None)
     chat.add_argument("--swarm-file", "--swarm_file", default=None,
                       help="JSON swarm definition (default: the packaged one)")
@@ -855,6 +869,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+
+    # Resolved once, here, rather than in each command: everyone in a swarm must be on the
+    # same model string (it sets the DHT prefix), so a command that forgot to consult the
+    # swarm file would put that person in a different swarm with no error at all.
+    if hasattr(args, "model"):
+        from seedmesh.cli.swarm import resolve_model
+
+        args.model = resolve_model(args.model, getattr(args, "swarm_file", None))
 
     if args.command == "setup":
         from seedmesh.cli.setup import DEFAULT_DIR, cmd_setup

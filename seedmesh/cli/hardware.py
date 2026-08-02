@@ -63,6 +63,56 @@ class BlockPlan:
         return min(1.0, self.recommended_blocks / self.n_layers) if self.n_layers else 0.0
 
 
+# The exact wheel that matches the CPU build most people end up with. Verified available
+# on 2026-08-02: the cu126 index carries torch 2.13.0, the same version as the default CPU
+# wheel, so this is a swap rather than an upgrade that drags dependencies with it.
+CUDA_TORCH_FIX = (
+    "pip install --force-reinstall --index-url https://download.pytorch.org/whl/cu126 "
+    "torch==2.13.0+cu126"
+)
+
+
+def torch_cuda_ready() -> tuple[bool, str]:
+    """Whether *torch* can use a GPU -- which is not the same question as whether one exists.
+
+    `detect_gpus` asks nvidia-smi; Petals asks `torch.cuda`. Those disagree in a way that
+    fails silently and expensively: `pip install petals` pulls the CPU-only torch wheel by
+    default, so probe reports "27 blocks on your RTX 3050 at nf4", serve accepts it, and the
+    whole model runs on the CPU with nobody told. The server works, slowly, and looks
+    correct. Found on this machine, which had been serving on CPU while reporting a GPU.
+    """
+    try:
+        import torch
+    except ImportError:
+        return False, "torch is not installed"
+    if torch.cuda.is_available():
+        return True, f"torch {torch.__version__}"
+    if "+cpu" in torch.__version__:
+        return False, (
+            f"torch {torch.__version__} is the CPU-only build -- it has no CUDA compiled in, "
+            "whatever nvidia-smi reports"
+        )
+    return False, f"torch {torch.__version__} has CUDA support but cannot see a device"
+
+
+def warn_if_gpu_unusable(gpus: list) -> list[str]:
+    """Lines to print when a GPU exists but torch cannot reach it. Empty when all is well."""
+    if not gpus:
+        return []  # no GPU at all is a different, already-handled situation
+    ready, detail = torch_cuda_ready()
+    if ready:
+        return []
+    return [
+        "",
+        f"  WARNING: nvidia-smi sees {gpus[0].name}, but torch cannot use it.",
+        f"    {detail}",
+        "    Serving will fall back to the CPU. It will work and it will be slow, and",
+        "    nothing else would have told you. To fix:",
+        f"      {CUDA_TORCH_FIX}",
+        "",
+    ]
+
+
 def detect_gpus() -> list[GpuInfo]:
     """Query nvidia-smi. Returns an empty list when there is no NVIDIA GPU."""
     binary = shutil.which("nvidia-smi")

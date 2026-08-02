@@ -654,3 +654,57 @@ def test_an_interrupted_wait_is_not_diagnosed_as_symmetric_nat():
 
     result = diagnose([Address("10.0.0.155", 31338)], n_peers=4, waited=12, timeout=120)
     assert result.verdict == "still-waiting"
+
+
+# ---- the swarm file's model must actually be authoritative -------------------
+#
+# It carried a `model` field from the start that nothing read: every command defaulted to a
+# constant instead. Handing someone a swarm definition for a different model silently did
+# nothing -- and the model string sets the DHT prefix, so the wrong one puts a peer in a
+# different swarm, seeing nobody, with no error.
+
+
+def _swarm_file(tmp_path, model, name="test-swarm"):
+    import json
+
+    path = tmp_path / "swarm.json"
+    path.write_text(
+        json.dumps({"name": name, "model": model, "bootstrap_peers": ["/ip4/1.2.3.4/tcp/1/p2p/Qm"]}),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def test_the_swarm_file_supplies_the_model(tmp_path):
+    from seedmesh.cli.swarm import resolve_model
+
+    path = _swarm_file(tmp_path, "some-org/some-8b")
+    assert resolve_model(None, path) == "some-org/some-8b"
+
+
+def test_an_explicit_model_still_wins(tmp_path):
+    from seedmesh.cli.swarm import resolve_model
+
+    path = _swarm_file(tmp_path, "some-org/some-8b")
+    assert resolve_model("other/model", path) == "other/model"
+
+
+def test_a_missing_swarm_file_falls_back_rather_than_crashing():
+    from seedmesh.cli.swarm import DEFAULT_MODEL, resolve_model
+
+    assert resolve_model(None, "/nonexistent/swarm.json") == DEFAULT_MODEL
+
+
+def test_main_resolves_the_model_for_every_command_that_takes_one(tmp_path, monkeypatch):
+    import seedmesh.cli.main as main_mod
+
+    path = _swarm_file(tmp_path, "some-org/some-8b")
+    seen = {}
+
+    def capture(args):
+        seen["model"] = args.model
+        return 0
+
+    monkeypatch.setattr(main_mod, "_cmd_probe", capture)
+    main_mod.main(["probe", "--swarm-file", path])
+    assert seen["model"] == "some-org/some-8b"

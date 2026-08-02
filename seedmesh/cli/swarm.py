@@ -61,6 +61,32 @@ def load_swarm(path: Optional[str] = None) -> Optional[Swarm]:
     )
 
 
+DEFAULT_MODEL = "JackFram/llama-160m"
+
+
+def resolve_model(explicit: Optional[str], swarm_file: Optional[str] = None) -> str:
+    """Which model to use, in the same precedence order as the peers.
+
+    The swarm file carried a `model` field from the start and nothing read it: every command
+    defaulted to a constant instead. Handing someone a swarm definition for a different model
+    therefore did nothing at all, and the failure is silent in the worst way -- the model
+    string sets the DHT prefix, so a peer on the wrong one joins a *different swarm*, sees
+    nobody, and gets no error.
+
+    Everyone in a swarm must agree on this, which is exactly why it belongs in the file you
+    hand people rather than in each person's command line.
+    """
+    if explicit:
+        return explicit
+    try:
+        swarm = load_swarm(swarm_file)
+    except FileNotFoundError:
+        return DEFAULT_MODEL
+    if swarm is not None and swarm.model:
+        return swarm.model
+    return DEFAULT_MODEL
+
+
 def resolve_peers(explicit: Optional[List[str]], swarm_file: Optional[str] = None):
     """Return (peers, note) for the CLI to use and print.
 
