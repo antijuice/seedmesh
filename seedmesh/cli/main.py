@@ -139,13 +139,15 @@ def _cmd_probe(args: argparse.Namespace) -> int:
     print()
     for gpu in gpus:
         for quant in (args.quant,) if args.quant else ("nf4", "int8", "none"):
-            plan = plan_blocks(config, gpu, quant=quant, model_name=args.model)
+            plan = plan_blocks(config, gpu, quant=quant, model_name=args.model,
+                               attn_cache_tokens=args.attn_cache_tokens)
             print(f"[{quant}]")
             for line in describe_plan(plan, gpu):
                 print(line)
             print()
     print("Host with:")
-    best = plan_blocks(config, gpus[0], quant=args.quant or "nf4", model_name=args.model)
+    best = plan_blocks(config, gpus[0], quant=args.quant or "nf4", model_name=args.model,
+                       attn_cache_tokens=args.attn_cache_tokens)
     print(f"  seedmesh serve --model {args.model} --quant {best.quant} "
           f"--num-blocks {max(1, best.recommended_blocks)} --initial-peers <addr>")
     return 0
@@ -256,7 +258,8 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             return 2
         for line in warn_if_gpu_unusable(gpus):
             print(line)
-        plan = plan_blocks(config, gpus[0], quant=args.quant, model_name=args.model)
+        plan = plan_blocks(config, gpus[0], quant=args.quant, model_name=args.model,
+                           attn_cache_tokens=args.attn_cache_tokens)
         num_blocks = max(1, plan.recommended_blocks)
         print(f"auto-sized to {num_blocks} block(s) on {gpus[0].name} at {args.quant}")
         if plan.recommended_blocks <= 0:
@@ -279,6 +282,10 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         print("no bootstrap peers found: starting a NEW private swarm")
     if args.device:
         command += ["--device", args.device]
+    # Must reach the server too, not just the sizing: auto-sizing against a smaller cache
+    # while the server allocates the default would OOM by exactly the amount we planned around.
+    if args.attn_cache_tokens:
+        command += ["--attn_cache_tokens", str(args.attn_cache_tokens)]
     if args.public_name:
         command += ["--public_name", args.public_name]
     if args.host_maddrs:
@@ -758,6 +765,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="default: whatever the swarm file names")
     probe.add_argument("--swarm-file", "--swarm_file", default=None)
     probe.add_argument("--quant", choices=["none", "int8", "nf4"], default=None)
+    probe.add_argument("--attn-cache-tokens", "--attn_cache_tokens", type=int, default=None,
+                       help="attention cache budget per block; lower fits more blocks")
 
     serve = subparsers.add_parser("serve", help="host blocks for a swarm")
     serve.add_argument("--model", default=None,
@@ -765,6 +774,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--num-blocks", "--num_blocks", type=int, default=None,
                        help="default: auto-size")
     serve.add_argument("--quant", choices=["none", "int8", "nf4"], default="nf4")
+    serve.add_argument("--attn-cache-tokens", "--attn_cache_tokens", type=int, default=None,
+                       help="attention cache budget per block; lower fits more blocks")
     serve.add_argument("--initial-peers", "--initial_peers", nargs="+", default=None)
     serve.add_argument("--swarm-file", "--swarm_file", default=None,
                       help="JSON swarm definition (default: the packaged one)")

@@ -54,6 +54,12 @@ class BlockPlan:
     usable_bytes: int
     recommended_blocks: int
 
+    # Split out so `describe_plan` can show both. A volunteer who sees only a total cannot
+    # tell that quantizing harder will not buy them what they expect -- nf4 shrinks the
+    # weights and leaves the cache untouched.
+    weight_bytes_per_block: int = 0
+    cache_bytes_per_block: int = 0
+
     @property
     def covers_whole_model(self) -> bool:
         return self.recommended_blocks >= self.n_layers
@@ -227,6 +233,45 @@ def params_per_layer(config: dict, layer_index: int) -> int:
     return params_per_block(dense)
 
 
+def attn_cache_bytes_per_block(
+    config: dict, *, dtype_bytes: int = 2, tokens: Optional[int] = None
+) -> int:
+    """VRAM Petals reserves for one block's attention cache.
+
+    This is charged PER BLOCK, which is why leaving it out of the plan gets worse the more
+    blocks you take -- exactly backwards from a safety margin. Measured on Llama-3.1-8B:
+    64 MiB per block, so the recommendation of 25 blocks came to 2.61 GiB of weights plus
+    1.56 GiB of cache = 4.17 GiB on a 4.0 GiB card. It would have OOM'd shortly after
+    starting, and the volunteer would have read it as their hardware being inadequate.
+
+    Mirrors `Server.__init__` (petals/server/server.py): the token budget quadruples for
+    grouped/multi-query attention, and MLA needs the width attention actually stores rather
+    than `2 * hidden`. Kept in step with `tools/port_petals.py` patch 11.
+    """
+    hidden = int(config.get("hidden_size", 0))
+    heads = int(config.get("num_attention_heads", 0) or 0)
+    kv_heads = int(config.get("num_key_value_heads", heads) or heads or 1)
+    groups = max(1, heads // kv_heads) if heads else 1
+
+    # Petals: 16384 tokens when grouped/multi-query, else 4096. This is the single biggest
+    # lever a volunteer has. It bounds how much concurrent session length a server can hold,
+    # NOT the model's quality or context window -- so on a small card, lowering it is how you
+    # trade concurrency for blocks, and on an 8B model it is the difference between two 4 GiB
+    # laptops covering the model and falling two blocks short.
+    if tokens is None:
+        tokens = 16384 if groups > 1 else 4096
+
+    qk_nope = config.get("qk_nope_head_dim")
+    qk_rope = config.get("qk_rope_head_dim")
+    if qk_nope is not None and qk_rope is not None:
+        v_dim = config.get("v_head_dim", qk_nope)
+        width = heads * (int(qk_nope) + int(qk_rope) + int(v_dim))
+    else:
+        width = (2 * hidden) // groups
+
+    return width * tokens * dtype_bytes
+
+
 def plan_blocks(
     config: dict,
     gpu: GpuInfo,
@@ -234,6 +279,7 @@ def plan_blocks(
     quant: str = "nf4",
     model_name: str = "",
     reserve_bytes: Optional[int] = None,
+    attn_cache_tokens: Optional[int] = None,
 ) -> BlockPlan:
     """How many blocks of this model fit on this GPU."""
     if quant not in BYTES_PER_PARAM:
@@ -248,7 +294,14 @@ def plan_blocks(
         per_block = max(params_per_layer(config, i) for i in range(n_layers))
     else:
         per_block = params_per_block(config)
-    bytes_per_block = int(per_block * BYTES_PER_PARAM[quant])
+    weight_bytes = int(per_block * BYTES_PER_PARAM[quant])
+
+    # Weights are not the whole per-block cost. Quantization shrinks the weights and does
+    # nothing to the attention cache, so the cache's share GROWS as quantization improves:
+    # on Llama-3.1-8B at nf4 it is 64 MiB against 107 MiB of weights, well over a third of
+    # the real cost of a block.
+    cache_bytes = attn_cache_bytes_per_block(config, tokens=attn_cache_tokens)
+    bytes_per_block = weight_bytes + cache_bytes
 
     if reserve_bytes is None:
         reserve_bytes = max(MIN_RESERVE_BYTES, int(gpu.total_bytes * RESERVE_FRACTION))
@@ -265,6 +318,8 @@ def plan_blocks(
         bytes_per_block=bytes_per_block,
         usable_bytes=usable,
         recommended_blocks=recommended,
+        weight_bytes_per_block=weight_bytes,
+        cache_bytes_per_block=cache_bytes,
     )
 
 
@@ -365,9 +420,24 @@ def describe_plan(plan: BlockPlan, gpu: GpuInfo) -> list[str]:
         f"  model             {plan.model} ({plan.n_layers} blocks)",
         f"  quantization      {plan.quant} ({BYTES_PER_PARAM[plan.quant]} bytes/param)",
         f"  per block         {plan.params_per_block / 1e6:.1f}M params, "
-        f"{plan.bytes_per_block / 2**20:.0f} MiB",
+        f"{plan.bytes_per_block / 2**20:.0f} MiB "
+        f"({plan.weight_bytes_per_block / 2**20:.0f} weights + "
+        f"{plan.cache_bytes_per_block / 2**20:.0f} attention cache)",
         f"  usable VRAM       {plan.usable_bytes / 2**30:.1f} GiB (after reserve)",
     ]
+    if plan.cache_bytes_per_block > plan.weight_bytes_per_block // 2 and plan.n_layers:
+        with_smaller = plan.usable_bytes // max(
+            1, plan.weight_bytes_per_block + plan.cache_bytes_per_block // 4
+        )
+        if with_smaller > plan.recommended_blocks:
+            lines.append(
+                f"  cache is large    --attn-cache-tokens 4096 would fit "
+                f"{min(int(with_smaller), plan.n_layers)} blocks instead of "
+                f"{plan.recommended_blocks}"
+            )
+            lines.append(
+                "                    (bounds concurrent sessions, not context length)"
+            )
     if plan.recommended_blocks <= 0:
         lines.append("  recommendation    cannot host even one block -- try --quant nf4, "
                      "a smaller model, or free VRAM")

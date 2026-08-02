@@ -53,7 +53,10 @@ Two verified-reachable, ungated options:
 | model | arch | blocks | use |
 | --- | --- | --- | --- |
 | `JackFram/llama-160m` | llama | 12 | first connectivity test — seconds to download, runs on CPU |
-| `NousResearch/Meta-Llama-3.1-8B-Instruct` | llama | 32 | a real swarm |
+| `NousResearch/Meta-Llama-3.1-8B-Instruct` | llama | 32 | a real swarm — this is what `swarm.json` names |
+
+Running the 8B model on two laptop GPUs needs one non-obvious setting; see
+[SWITCHING-TO-8B.md](SWITCHING-TO-8B.md).
 
 `meta-llama/*` and `google/gemma-*` are **gated** — anonymous fetches are refused, so every
 volunteer would need a Hugging Face account and accepted licence terms. The `NousResearch`
@@ -231,8 +234,15 @@ That is the cause far more often than the router is. If you do have four and it 
 your NAT is probably symmetric or you are behind CGNAT; forward the port. See
 [NAT-AND-RELAYS.md](NAT-AND-RELAYS.md).
 
-**Out of memory shortly after starting** — the auto-size reserve is a heuristic, not a
-measurement. Re-run with a lower `--num-blocks`.
+**Out of memory shortly after starting** — much less likely than it was: the plan now
+charges the attention cache per block instead of hoping a flat reserve covers it. If it still
+happens, re-run with a lower `--num-blocks`; auto-sizing uses free VRAM at the moment it runs,
+and a browser can move that by a gigabyte.
+
+**`cache is large` in probe output** — the attention cache can exceed half the size of a
+block's weights, because quantization shrinks weights and leaves the cache untouched.
+`--attn-cache-tokens 4096` trades concurrent session capacity for blocks; on an 8B model it is
+the difference between two 4 GiB cards covering the model and falling two blocks short.
 
 ## What does not work yet
 

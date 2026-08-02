@@ -115,11 +115,17 @@ def test_measured_bytes_per_param_are_the_ones_the_spike_produced():
     assert BYTES_PER_PARAM["nf4"] == pytest.approx(0.516, abs=1e-3)
 
 
-def test_4gb_card_sizing_matches_the_quantization_spike():
-    """The spike measured ~28 NF4 blocks of an 8B-class model on a 4GB card."""
+def test_4gb_card_sizing_leaves_room_for_the_attention_cache():
+    """CORRECTED 2026-08-02. This asserted 20-32 blocks, from a spike that measured how many
+    NF4 *weights* fit on a 4 GiB card (~28). A running server also reserves an attention
+    cache of 64 MiB per block for this architecture, which the plan did not charge -- so the
+    old bound was measuring the wrong thing and this test was holding the bug in place.
+
+    The number that matters is not "how many blocks fit" but "how many blocks fit alongside
+    the cache they force", which is what the assertion below checks directly."""
     plan = plan_blocks(BIG, gpu(4), quant="nf4")
-    # The spike reserved a flat 1 GiB; this reserves max(1 GiB, 15%), so expect >= 20.
-    assert 20 <= plan.recommended_blocks <= 32
+    assert plan.recommended_blocks * plan.bytes_per_block <= gpu(4).free_bytes
+    assert 12 <= plan.recommended_blocks <= 20
 
 
 # ---- supported architectures ------------------------------------------------
@@ -285,3 +291,72 @@ def test_no_warning_when_torch_can_use_the_gpu(monkeypatch):
 
     monkeypatch.setattr(hardware, "torch_cuda_ready", lambda: (True, "torch 2.13.0+cu126"))
     assert hardware.warn_if_gpu_unusable([FakeGpu()]) == []
+
+
+# ---- the attention cache is a per-block cost, not a flat reserve -------------
+#
+# It was missing from the plan entirely. Because the cache scales with block count while the
+# reserve is flat, the recommendation got LESS safe the more blocks it suggested -- exactly
+# backwards. Measured on Llama-3.1-8B: probe recommended 25 blocks = 2.61 GiB weights +
+# 1.56 GiB cache = 4.17 GiB on a 4.0 GiB card, an OOM a few seconds after startup that reads
+# to the volunteer as "my GPU is too small".
+
+LLAMA_8B = {
+    "num_hidden_layers": 32,
+    "hidden_size": 4096,
+    "intermediate_size": 14336,
+    "num_attention_heads": 32,
+    "num_key_value_heads": 8,
+    "vocab_size": 128256,
+}
+
+
+def test_grouped_attention_quadruples_the_token_budget():
+    from seedmesh.cli.hardware import attn_cache_bytes_per_block
+
+    # Petals: 16384 tokens when num_key_value_groups > 1, else 4096. Llama-3.1-8B has
+    # 32 heads / 8 kv heads = 4 groups, so it takes the larger budget.
+    assert attn_cache_bytes_per_block(LLAMA_8B) == (2 * 4096 // 4) * 16384 * 2
+
+
+def test_multi_head_attention_uses_the_smaller_budget():
+    from seedmesh.cli.hardware import attn_cache_bytes_per_block
+
+    mha = dict(LLAMA_8B, num_key_value_heads=32)
+    assert attn_cache_bytes_per_block(mha) == (2 * 4096) * 4096 * 2
+
+
+def test_mla_is_sized_from_what_attention_actually_stores():
+    from seedmesh.cli.hardware import attn_cache_bytes_per_block
+
+    # K and V are different widths under MLA; `2 * hidden` does not describe either.
+    mla = dict(LLAMA_8B, qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128)
+    assert attn_cache_bytes_per_block(mla) == 32 * (128 + 64 + 128) * 16384 * 2
+
+
+def test_the_plan_charges_the_cache_and_stops_recommending_an_oom():
+    from seedmesh.cli.hardware import GpuInfo, plan_blocks
+
+    gpu = GpuInfo(name="RTX 3050", total_bytes=4 * 2**30, free_bytes=int(3.7 * 2**30),
+                  compute_capability="8.6")
+    plan = plan_blocks(LLAMA_8B, gpu, quant="nf4", model_name="llama-8b")
+
+    assert plan.cache_bytes_per_block > 0
+    assert plan.bytes_per_block == plan.weight_bytes_per_block + plan.cache_bytes_per_block
+    # The whole point: what it recommends must actually fit alongside its own cache.
+    real_cost = plan.recommended_blocks * plan.bytes_per_block
+    assert real_cost <= gpu.free_bytes
+    assert plan.recommended_blocks < 25, "25 blocks was the OOM this test exists to prevent"
+
+
+def test_quantizing_harder_does_not_shrink_the_cache():
+    from seedmesh.cli.hardware import GpuInfo, plan_blocks
+
+    gpu = GpuInfo(name="RTX 3050", total_bytes=4 * 2**30, free_bytes=int(3.7 * 2**30),
+                  compute_capability="8.6")
+    nf4 = plan_blocks(LLAMA_8B, gpu, quant="nf4")
+    none = plan_blocks(LLAMA_8B, gpu, quant="none")
+    # Identical caches, different weights -- so the cache's share of a block grows as
+    # quantization improves, which is the opposite of what people expect.
+    assert nf4.cache_bytes_per_block == none.cache_bytes_per_block
+    assert nf4.weight_bytes_per_block < none.weight_bytes_per_block
