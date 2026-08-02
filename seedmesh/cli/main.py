@@ -779,6 +779,10 @@ def _enable_verification(reputation, args: argparse.Namespace, dht) -> None:
     )
     print("  verification on: a sample of requests will be re-checked on a second server")
 
+    if not args.no_routing_gate:
+        reputation.enable_routing_gate(manager)
+        print("  routing gate on: peers proven to compute incorrectly will be avoided")
+
 
 # ---- parser -----------------------------------------------------------------
 #
@@ -904,6 +908,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="do not measure servers, and do not publish or fetch reputation")
     chat.add_argument("--no-verify", "--no_verify", action="store_true",
                       help="measure servers but do not re-check their work on a second one")
+    chat.add_argument("--no-routing-gate", "--no_routing_gate", action="store_true",
+                      help="keep routing to peers even after corroborated incorrect work")
     chat.add_argument("--gossip-interval", "--gossip_interval", type=float,
                       default=DEFAULT_SYNC_INTERVAL_S,
                       help="seconds between reputation publish/fetch rounds")

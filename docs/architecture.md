@@ -286,9 +286,19 @@ and `seedmesh monitor` with a public HTML view.
     which is correct, and starts working when servers are directly reachable.
 * **Servers do not gossip.** They receive requests rather than routing them, so they form no
   opinion about anyone. Reputation is entirely client-side.
-* **Reputation does not steer routing.** Measured, shared, and deliberately not yet acted on;
-  a bias strong enough to avoid a faulty server is also strong enough to strand an honest
-  slow one.
+* ~~Reputation does not steer routing.~~ **Built 2026-08-02**, as a **veto rather than a
+  preference ordering**. A client stops routing to peers with corroborated evidence of
+  incorrect work; it does *not* rank servers by score. Ranking would mean preferring fast
+  servers, since a score blends latency in, and that starves the honest volunteer on a slow
+  connection — the failure this project keeps having to undo.
+
+  Division of labour: Petals decides *how fast* (its `min_latency` router measures
+  client-to-server RTT itself), Seedmesh decides *whether the answer can be trusted*. A
+  server cannot self-report its way out of a mismatch two independent verifiers confirmed.
+
+  Implemented via `ClientConfig.blocked_servers`, which Petals filters inside `_update()` —
+  a supported mechanism, no patch. Proven against a live client: convicting every server it
+  knew turned a working route into `MissingBlocksError`.
 * **MoE verification cannot distinguish an expert swap from a fault** — see
   [findings-moe.md](findings-moe.md).
 * No training or fine-tuning (a spec non-goal).

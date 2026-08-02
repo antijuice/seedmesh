@@ -97,6 +97,7 @@ class ClientReputation:
         self._last_sync = 0.0
         self._detach: Optional[Callable[[], None]] = None
         self.verifier = None
+        self.gate = None
 
     def _cluster_of(self, peer_id: str) -> str:
         return self._clusters.get(peer_id, UNKNOWN_CLUSTER)
@@ -120,6 +121,18 @@ class ClientReputation:
         )
         self.verifier = InlineVerifier(sampler, run_on=run_on, discover=discover)
         self.observer.verifier = self.verifier
+
+    def enable_routing_gate(self, sequence_manager) -> None:
+        """Stop routing to peers with corroborated evidence of incorrect work.
+
+        The last step of the loop: measure, share, and finally *act*. Deliberately a veto on
+        proven-wrong peers rather than a preference for high scorers -- see
+        `seedmesh/reputation/routing.py` for why ranking by score starves honest slow
+        volunteers.
+        """
+        from seedmesh.reputation.routing import make_gate
+
+        self.gate = make_gate(sequence_manager, self.scorer, self.aggregator)
 
     # ---- lifecycle ---------------------------------------------------------------
 
@@ -179,12 +192,27 @@ class ClientReputation:
         # Verification before gossip, so a verdict reached this round is published this
         # round rather than sitting locally until the next one.
         self.run_verification()
+        # ...and the gate after it, so a mismatch confirmed this round stops receiving work
+        # immediately rather than at the next prompt.
+        self.refresh_gate()
         try:
             _, accepted = self.gossip.sync()
         except Exception:
             return None
         self.save()
         return accepted
+
+    def refresh_gate(self) -> set:
+        """Re-apply routing exclusions. Never raises into the caller."""
+        if self.gate is None:
+            return set()
+        try:
+            newly = self.gate.refresh()
+        except Exception:
+            return set()
+        for peer_id in newly:
+            print(f"  routing: excluding ...{peer_id[-8:]} (corroborated incorrect work)")
+        return newly
 
     def run_verification(self, limit: int = 1) -> list:
         """Replay a sampled request against a second server. Never raises into the caller."""
@@ -204,6 +232,8 @@ class ClientReputation:
         lines.extend(self.observer.describe())
         if self.verifier is not None:
             lines.extend(self.verifier.describe())
+        if self.gate is not None:
+            lines.extend(self.gate.describe())
         lines.extend(self.gossip.describe())
         heard = sorted(self.aggregator.subjects())
         if heard:
