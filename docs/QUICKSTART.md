@@ -104,7 +104,41 @@ Same story — no arguments. It waits out the routing warm-up (a few minutes aft
 starts, its blocks reach the DHT before its address does) rather than failing your first
 prompt, and retries a stalled request with a fresh session instead of hanging.
 
-## 5. Run your own swarm
+## 5. See what the swarm is doing
+
+```bash
+seedmesh monitor
+```
+
+Who is hosting which blocks, whether the model is fully covered, and what other people's
+clients have measured about each server. Add `--watch 30` to refresh, or
+`--html swarm.html` to write a self-contained page you can serve anywhere.
+
+Read the coverage bar first. **A model is usable only if every block has a host** -- twelve
+servers all hosting blocks 0-3 serve nothing at all, so "how many volunteers" is the wrong
+question and the report does not lead with it.
+
+Two columns that look equally authoritative are not:
+
+| column | where it comes from |
+| --- | --- |
+| **self-reported** | the server's own announcement -- name, throughput, compute profile. Checked by nothing. |
+| **observed by others** | signature-verified reputation records from clients that actually sent it requests |
+
+A server with a high self-reported throughput and no observations is one nobody has tested
+yet. Real output from this swarm, showing exactly that:
+
+```
+  server                blocks  profile                self-rep.  observed
+  ...jSUDSNRi            0-12   nf4/bf16/eager+relay   1091 tok/s  not yet measured
+  hewitt                 0-12   none/bf16/eager+relay   173 tok/s  0.992 (3 obs, 1 clust)
+```
+
+The profile column is quantisation / dtype / attention kernel. Volunteers differ here and
+that is normal -- it is why verification compares within a profile instead of treating the
+difference as a fault.
+
+## 6. Run your own swarm
 
 You need **at least four publicly reachable peers**. This is not a redundancy
 recommendation — it is a hard requirement of go-libp2p, and getting it wrong fails in a way
