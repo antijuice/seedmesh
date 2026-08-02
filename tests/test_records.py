@@ -161,10 +161,44 @@ def test_oversized_batch_is_rejected():
 
 
 def test_build_truncates_rather_than_overflowing():
+    """CORRECTED 2026-08-02. This asserted truncation to exactly MAX_REPORTS_PER_BATCH,
+    which is the behaviour that caused the bug: 512 reports serialize to 76.6 KB, and a DHT
+    store of that size almost never succeeds. The count cap is now a ceiling and the BYTE
+    budget is what binds."""
+    import json
+
+    from seedmesh.reputation.records import MAX_BATCH_BYTES
+
     clock = ManualClock()
     reports = [_report(subject=f"sm{i:05d}", ok=float(i)) for i in range(MAX_REPORTS_PER_BATCH + 50)]
     raw = build_batch(Identity.generate(), reports, epoch=1, clock=clock)
-    assert len(verify_batch(raw, clock=clock).reports) == MAX_REPORTS_PER_BATCH
+
+    assert len(json.dumps(raw)) <= MAX_BATCH_BYTES
+    kept = verify_batch(raw, clock=clock).reports
+    assert 0 < len(kept) < MAX_REPORTS_PER_BATCH
+
+
+def test_a_trimmed_batch_keeps_the_best_evidenced_reports():
+    """What survives the cut decides whether trimming is safe. Dropping well-supported
+    claims at random would make gossip worse than not gossiping."""
+    clock = ManualClock()
+    reports = [_report(subject=f"sm{i:05d}", ok=float(i)) for i in range(300)]
+    raw = build_batch(Identity.generate(), reports, epoch=1, clock=clock)
+
+    kept = {r.subject for r in verify_batch(raw, clock=clock).reports}
+    # `ok` rises with i, so the highest-numbered subjects have the most evidence.
+    assert "sm00299" in kept
+    assert "sm00000" not in kept
+
+
+def test_a_single_huge_report_still_produces_a_valid_batch():
+    """The trim loop must terminate even when one report alone exceeds the budget --
+    an empty or malformed batch would be worse than an oversized one."""
+    clock = ManualClock()
+    raw = build_batch(
+        Identity.generate(), [_report(subject="x" * 4000)], epoch=1, clock=clock
+    )
+    assert len(verify_batch(raw, clock=clock).reports) == 1
 
 
 def test_negative_counts_are_rejected():

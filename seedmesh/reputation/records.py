@@ -23,6 +23,7 @@ Attribution is not truth. A verified batch means "this observer really said this
 from __future__ import annotations
 
 import base64
+import json
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
@@ -39,7 +40,42 @@ from seedmesh.core.types import PeerId
 OBSERVATION_BATCH_CONTEXT = "seedmesh/observation-batch/v1"
 RECORD_VERSION = 1
 
+# base64 of a 32-byte key (44) + a 64-byte signature (88), plus JSON punctuation.
+SIGNATURE_ENVELOPE_BYTES = 160
+
 MAX_REPORTS_PER_BATCH = 512
+"""Hard ceiling on report count. NOT the binding constraint -- see MAX_BATCH_BYTES."""
+
+MAX_BATCH_BYTES = 2048
+"""Serialized size a batch may reach before reports are dropped.
+
+The cap that matters, and it was missing. A batch was capped only by report COUNT, and 512
+reports serialize to **76.6 KB**, while a DHT store's success falls off as the payload grows.
+
+Two runs against the live swarm, and they agree on direction while disagreeing sharply on
+magnitude:
+
+    payload        run 1    run 2
+      ~12-256 B      5%      40%
+      ~2-4 KB       55%   20-50%
+      8-16 KB         -      70%
+
+So the honest claim is "bigger is worse, and 76 KB is hopeless" -- NOT a calibrated curve.
+The absolute rate swings enough between runs that any single number for it, including the
+"1 in 3" previously recorded here, describes one afternoon rather than the system.
+
+The mechanism is not the network. The first sweep died inside hivemind's own DHT process:
+
+    BlockingIOError: [Errno 11] Resource temporarily unavailable
+      hivemind.dht.dht._run -> self._inner_pipe.recv()
+
+hivemind runs the DHT in a separate process and talks to it over a multiprocessing pipe, and
+large values overflow it. That makes this a LOCAL limit rather than swarm flakiness, which
+is why capping the payload is the right fix and why raising the retry count is not.
+
+Dropping reports is safe in a way truncating most things is not: the batch is sorted by
+evidence first, so what is lost is the least-supported claims, and the next round carries
+them again."""
 MAX_TTL_S = 3600.0
 """Longest a batch may claim to stay valid. Caps how long a departed observer keeps voting."""
 
@@ -160,6 +196,46 @@ def _body(
     }
 
 
+def _signed_size(body: dict[str, Any]) -> int:
+    """Size of the record as it goes on the wire, including the signature envelope.
+
+    The signature and public key are fixed-size base64 fields, so they are added as a
+    constant rather than by signing a batch that is about to be discarded.
+
+    Deliberately measured with JSON's default separators rather than compact ones. The wire
+    format is actually msgpack, which is smaller than either -- so this over-estimates, and
+    over-estimating is the safe direction: the cost is a few reports deferred to the next
+    round, where under-estimating puts a record on the wire that will not store.
+    """
+    return len(json.dumps(body)) + SIGNATURE_ENVELOPE_BYTES
+
+
+def _fit_to_budget(identity, reports, body, epoch, issued_at, ttl_s):
+    """Drop the least-evidenced reports until the batch fits MAX_BATCH_BYTES.
+
+    Proportional estimate then verify, rather than one-at-a-time: a full batch is ~37x over
+    budget, and removing reports singly would serialize it hundreds of times.
+    """
+    size = _signed_size(body)
+    if size <= MAX_BATCH_BYTES or not reports:
+        return reports
+
+    for _ in range(8):
+        if len(reports) <= 1:
+            # One report can exceed the budget on its own (a pathological subject id). An
+            # oversized batch still verifies and may still store; an EMPTY one is a
+            # correctly-signed claim about nothing, which is strictly worse.
+            break
+        estimate = int(len(reports) * MAX_BATCH_BYTES / size)
+        keep = max(1, min(estimate, len(reports) - 1))
+        reports = reports[:keep]
+        body = _body(identity.peer_id, epoch, issued_at, issued_at + ttl_s, reports)
+        size = _signed_size(body)
+        if size <= MAX_BATCH_BYTES:
+            break
+    return reports
+
+
 def build_batch(
     identity: Identity,
     reports: Iterable[PeerReport],
@@ -180,11 +256,14 @@ def build_batch(
         raise ValueError("epoch must be non-negative")
 
     filtered = [r for r in reports if r.subject != identity.peer_id]
-    if len(filtered) > MAX_REPORTS_PER_BATCH:
-        filtered.sort(key=lambda r: -r.attempts)
-        filtered = filtered[:MAX_REPORTS_PER_BATCH]
+    # Sorted before either cap so both drop the LEAST-evidenced reports. A batch truncated
+    # arbitrarily would discard well-supported claims at random.
+    filtered.sort(key=lambda r: -r.attempts)
+    filtered = filtered[:MAX_REPORTS_PER_BATCH]
 
     issued_at = clock.now()
+    body = _body(identity.peer_id, epoch, issued_at, issued_at + ttl_s, filtered)
+    filtered = _fit_to_budget(identity, filtered, body, epoch, issued_at, ttl_s)
     body = _body(identity.peer_id, epoch, issued_at, issued_at + ttl_s, filtered)
     signature = identity.sign(body, context=OBSERVATION_BATCH_CONTEXT)
     return {
