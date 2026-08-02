@@ -148,8 +148,15 @@ def _cmd_probe(args: argparse.Namespace) -> int:
     print("Host with:")
     best = plan_blocks(config, gpus[0], quant=args.quant or "nf4", model_name=args.model,
                        attn_cache_tokens=args.attn_cache_tokens)
-    print(f"  seedmesh serve --model {args.model} --quant {best.quant} "
-          f"--num-blocks {max(1, best.recommended_blocks)} --initial-peers <addr>")
+    # Echo back what the user typed, not the resolved id: an alias is shorter and carries
+    # the settings the model needs. And no --initial-peers -- the swarm file supplies them,
+    # which is the whole reason `seedmesh serve` takes no arguments.
+    model_arg = getattr(args, "model_as_typed", None) or args.model
+    suggestion = f"  seedmesh serve --quant {best.quant} --num-blocks {max(1, best.recommended_blocks)}"
+    if model_arg != DEFAULT_MODEL:
+        suggestion = (f"  seedmesh serve --model {model_arg} --quant {best.quant} "
+                      f"--num-blocks {max(1, best.recommended_blocks)}")
+    print(suggestion)
     return 0
 
 
@@ -885,9 +892,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # same model string (it sets the DHT prefix), so a command that forgot to consult the
     # swarm file would put that person in a different swarm with no error at all.
     if hasattr(args, "model"):
-        from seedmesh.cli.swarm import resolve_model
+        from seedmesh.cli.swarm import resolve_model_choice
 
-        args.model = resolve_model(args.model, getattr(args, "swarm_file", None))
+        requested = args.model
+        choice, _swarm = resolve_model_choice(requested, getattr(args, "swarm_file", None))
+        args.model = choice.id
+        args.model_as_typed = requested
+
+        # An alias carries the settings its model needs, so `--model 8b` is enough on its
+        # own. Petals' default attention cache leaves a 4 GiB card two blocks short of
+        # covering the 8B model, and "you also had to pass this other flag" is a bad way to
+        # find that out. An explicit flag still wins.
+        if choice.attn_cache_tokens and getattr(args, "attn_cache_tokens", None) is None:
+            args.attn_cache_tokens = choice.attn_cache_tokens
+            if requested:
+                print(f"using '{requested}' -> {choice.id} "
+                      f"(attn-cache-tokens {choice.attn_cache_tokens})")
+        elif requested and requested != choice.id:
+            print(f"using '{requested}' -> {choice.id}")
 
     if args.command == "setup":
         from seedmesh.cli.setup import DEFAULT_DIR, cmd_setup

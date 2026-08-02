@@ -18,7 +18,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 # Below this, a NAT'd host cannot learn its own public address: go-libp2p's
 # identify/obsaddr.go accepts an observed address only once `len(seenBy) >= ActivationThresh`
@@ -31,15 +31,45 @@ PACKAGED = Path(__file__).resolve().parent.parent / "swarm.json"
 
 
 @dataclass(frozen=True)
+class ModelChoice:
+    """One model a swarm knows about, plus the settings it needs to run well.
+
+    Settings live here because forgetting one is not a mild inconvenience. On a 4 GiB card
+    the 8B model needs `attn_cache_tokens=4096`; at Petals' default of 16384 the same card
+    fits 15 blocks instead of 21, so two volunteers cover 30 of 32 blocks and the model does
+    not work at all. That is a bad thing to carry in someone's shell history.
+    """
+
+    id: str
+    attn_cache_tokens: Optional[int] = None
+    note: str = ""
+
+
+@dataclass(frozen=True)
 class Swarm:
     name: str
     model: str
     bootstrap_peers: List[str] = field(default_factory=list)
     source: str = "packaged"
+    models: Dict[str, ModelChoice] = field(default_factory=dict)
+    """Short aliases -> models. Everyone in a swarm must agree on the model string, so the
+    alternatives belong in the file everyone shares rather than in each person's command."""
 
     @property
     def is_underprovisioned(self) -> bool:
         return 0 < len(self.bootstrap_peers) < MIN_BOOTSTRAP_PEERS
+
+    def choose(self, name: Optional[str]) -> Optional[ModelChoice]:
+        """Resolve an alias, or None if this is not one.
+
+        Aliases are looked up before being treated as a model id. A Hugging Face repo id
+        effectively always contains a '/', and an alias never should, so the two cannot
+        collide in practice -- but the lookup is exact-match against names the swarm itself
+        declared, so it cannot capture a model the swarm never mentioned.
+        """
+        if not name:
+            return None
+        return self.models.get(name)
 
 
 def load_swarm(path: Optional[str] = None) -> Optional[Swarm]:
@@ -53,11 +83,27 @@ def load_swarm(path: Optional[str] = None) -> Optional[Swarm]:
 
     data = json.loads(chosen.read_text(encoding="utf-8"))
     peers = [p for p in data.get("bootstrap_peers", []) if p and not p.startswith("_")]
+
+    # A value may be a bare model id or an object carrying the settings that model needs.
+    models = {}
+    for alias, value in (data.get("models") or {}).items():
+        if alias.startswith("_"):
+            continue  # comment key
+        if isinstance(value, str):
+            models[alias] = ModelChoice(id=value)
+        elif isinstance(value, dict) and value.get("id"):
+            models[alias] = ModelChoice(
+                id=value["id"],
+                attn_cache_tokens=value.get("attn_cache_tokens"),
+                note=value.get("note", ""),
+            )
+
     return Swarm(
         name=data.get("name", "unnamed"),
         model=data.get("model", ""),
         bootstrap_peers=peers,
         source=str(chosen),
+        models=models,
     )
 
 
@@ -76,15 +122,32 @@ def resolve_model(explicit: Optional[str], swarm_file: Optional[str] = None) -> 
     Everyone in a swarm must agree on this, which is exactly why it belongs in the file you
     hand people rather than in each person's command line.
     """
-    if explicit:
-        return explicit
+    choice, _ = resolve_model_choice(explicit, swarm_file)
+    return choice.id
+
+
+def resolve_model_choice(
+    explicit: Optional[str], swarm_file: Optional[str] = None
+) -> tuple[ModelChoice, Optional[Swarm]]:
+    """The model *and* the settings the swarm says it needs. Returns (choice, swarm)."""
     try:
         swarm = load_swarm(swarm_file)
     except FileNotFoundError:
-        return DEFAULT_MODEL
-    if swarm is not None and swarm.model:
-        return swarm.model
-    return DEFAULT_MODEL
+        swarm = None
+
+    if swarm is not None:
+        alias = swarm.choose(explicit)
+        if alias is not None:
+            return alias, swarm
+        if not explicit and swarm.model:
+            # The default model may itself be one of the declared aliases' targets, in which
+            # case it should come with the same settings rather than silently without them.
+            for candidate in swarm.models.values():
+                if candidate.id == swarm.model:
+                    return candidate, swarm
+            return ModelChoice(id=swarm.model), swarm
+
+    return ModelChoice(id=explicit or DEFAULT_MODEL), swarm
 
 
 def resolve_peers(explicit: Optional[List[str]], swarm_file: Optional[str] = None):

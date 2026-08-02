@@ -708,3 +708,79 @@ def test_main_resolves_the_model_for_every_command_that_takes_one(tmp_path, monk
     monkeypatch.setattr(main_mod, "_cmd_probe", capture)
     main_mod.main(["probe", "--swarm-file", path])
     assert seen["model"] == "some-org/some-8b"
+
+
+# ---- model aliases -----------------------------------------------------------
+#
+# Everyone in a swarm must be on the same model string, and switching means passing it to
+# serve, chat AND monitor. A 40-character repo id in three places is a typo waiting to
+# happen, and the 8B model additionally needs --attn-cache-tokens or a 4 GiB card fits 15
+# blocks instead of 21 -- so two volunteers cover 30 of 32 and the model simply does not
+# work. That setting belongs with the model, in the file everyone shares.
+
+
+def _aliased_swarm(tmp_path):
+    import json
+
+    path = tmp_path / "swarm.json"
+    path.write_text(json.dumps({
+        "name": "aliased",
+        "model": "JackFram/llama-160m",
+        "models": {
+            "160m": "JackFram/llama-160m",
+            "8b": {"id": "org/big-8b", "attn_cache_tokens": 4096},
+        },
+        "bootstrap_peers": ["/ip4/1.2.3.4/tcp/1/p2p/Qm"],
+    }), encoding="utf-8")
+    return str(path)
+
+
+def test_an_alias_resolves_to_the_full_model_id(tmp_path):
+    from seedmesh.cli.swarm import resolve_model
+
+    assert resolve_model("8b", _aliased_swarm(tmp_path)) == "org/big-8b"
+    assert resolve_model("160m", _aliased_swarm(tmp_path)) == "JackFram/llama-160m"
+
+
+def test_an_unknown_name_is_still_treated_as_a_model_id(tmp_path):
+    from seedmesh.cli.swarm import resolve_model
+
+    # Aliases must not capture models the swarm never declared.
+    assert resolve_model("some/other-model", _aliased_swarm(tmp_path)) == "some/other-model"
+
+
+def test_no_model_uses_the_swarms_default(tmp_path):
+    from seedmesh.cli.swarm import resolve_model
+
+    assert resolve_model(None, _aliased_swarm(tmp_path)) == "JackFram/llama-160m"
+
+
+def test_an_alias_carries_the_settings_its_model_needs(tmp_path, monkeypatch):
+    import seedmesh.cli.main as main_mod
+
+    seen = {}
+    monkeypatch.setattr(main_mod, "_cmd_probe", lambda a: seen.update(vars(a)) or 0)
+    main_mod.main(["probe", "--model", "8b", "--swarm-file", _aliased_swarm(tmp_path)])
+    assert seen["model"] == "org/big-8b"
+    # The whole point: `--model 8b` alone must be enough.
+    assert seen["attn_cache_tokens"] == 4096
+
+
+def test_an_explicit_setting_still_beats_the_alias_default(tmp_path, monkeypatch):
+    import seedmesh.cli.main as main_mod
+
+    seen = {}
+    monkeypatch.setattr(main_mod, "_cmd_probe", lambda a: seen.update(vars(a)) or 0)
+    main_mod.main(["probe", "--model", "8b", "--attn-cache-tokens", "8192",
+                   "--swarm-file", _aliased_swarm(tmp_path)])
+    assert seen["attn_cache_tokens"] == 8192
+
+
+def test_the_packaged_swarm_defaults_to_the_small_model_and_offers_the_big_one():
+    from seedmesh.cli.swarm import load_swarm
+
+    swarm = load_swarm()
+    # A new volunteer should learn whether the NETWORK works before downloading 15 GiB.
+    assert swarm.model == "JackFram/llama-160m"
+    assert "8b" in swarm.models
+    assert swarm.models["8b"].attn_cache_tokens == 4096

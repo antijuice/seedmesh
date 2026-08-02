@@ -53,10 +53,24 @@ Two verified-reachable, ungated options:
 | model | arch | blocks | use |
 | --- | --- | --- | --- |
 | `JackFram/llama-160m` | llama | 12 | first connectivity test — seconds to download, runs on CPU |
-| `NousResearch/Meta-Llama-3.1-8B-Instruct` | llama | 32 | a real swarm — this is what `swarm.json` names |
+| `NousResearch/Meta-Llama-3.1-8B-Instruct` | llama | 32 | a real swarm |
 
-Running the 8B model on two laptop GPUs needs one non-obvious setting; see
+The packaged swarm defaults to **llama-160m** so a new volunteer learns whether the network
+works before downloading 15 GiB to learn whether their GPU does. `swarm.json` declares both
+as short aliases, so switching is one flag on each command:
+
+```bash
+seedmesh serve --model 8b
+seedmesh monitor --model 8b
+seedmesh chat --model 8b
+```
+
+An alias carries the settings its model needs — `8b` sets `attn-cache-tokens` automatically,
+which on a 4 GiB card is the difference between hosting 21 blocks and 15. See
 [SWITCHING-TO-8B.md](SWITCHING-TO-8B.md).
+
+Both models can run at once: a different model means a different DHT prefix, so the small
+swarm stays up while you test the large one on the same four bootstrap peers.
 
 `meta-llama/*` and `google/gemma-*` are **gated** — anonymous fetches are refused, so every
 volunteer would need a Hugging Face account and accepted licence terms. The `NousResearch`
