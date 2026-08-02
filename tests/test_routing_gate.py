@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from seedmesh.core.types import BlockRange, Observation, Outcome, PeerId, Verdict
+from seedmesh.core.types import BlockRange, Observation, Outcome, Verdict
 from seedmesh.reputation.routing import ReputationGate, make_gate
 from seedmesh.reputation.routing_bias import Router
 from seedmesh.reputation.scorer import ReputationScorer
