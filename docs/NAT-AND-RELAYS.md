@@ -211,7 +211,21 @@ port-forward would land on the Windows host without ever entering WSL. Port forw
 does not fix a WSL2 host; it also needs a `netsh interface portproxy` rule on the Windows
 side.
 
-**Fix for Windows hosts: mirrored networking.** WSL ≥ 2.0.0 on Windows 11 22H2+ can share the
+**Mirrored mode has its own hidden gate, found 2026-08-02.** It routes inbound traffic
+through a **separate Hyper-V firewall**, which defaults to `DefaultInboundAction = Block`. A
+correct router forward plus a correct Windows Firewall rule still drops everything, silently
+and with nothing logged. Measured on the dev laptop, which had both of those already in place
+and was still unreachable. Check with:
+
+```powershell
+Get-NetFirewallHyperVVMSetting -PolicyStore ActiveStore | Select-Object Name,DefaultInboundAction
+```
+
+Add a rule for the single port rather than flipping the default to Allow, which would expose
+every service in WSL to the local network. Full walkthrough:
+[PORT-FORWARDING-WINDOWS.md](PORT-FORWARDING-WINDOWS.md).
+
+**Fix for Windows hosts: mirrored networking.** WSL >= 2.0.0 on Windows 11 22H2+ can share the
 host's interfaces directly, removing the WSL NAT layer entirely. In `%USERPROFILE%\.wslconfig`:
 
 ```ini
