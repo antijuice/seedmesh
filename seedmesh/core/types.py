@@ -121,9 +121,27 @@ class ComputeProfile:
     """Attention kernel. Hosting a bare layer leaves this unset in transformers and the
     fallback is silent, so it is pinned and published rather than inferred."""
 
+    experts: str = "none"
+    """Mixture-of-experts kernel: ``none`` for dense models, else the transformers
+    ``_experts_implementation`` (``grouped_mm`` | ``batched_mm`` | ``deepgemm`` |
+    ``sonicmoe``).
+
+    Same reasoning as ``attn``, and the same measured trap. A hosted block has no model
+    wrapper to set this dispatch, and on a tiny Mixtral config (CPU/fp32) the unset default
+    and ``batched_mm`` both return **NaN** while ``grouped_mm`` returns finite values --
+    so it cannot be left implicit. Two honest servers on different expert kernels will
+    disagree numerically for the same reason two servers on different attention kernels do,
+    and an unpublished difference is read as fraud.
+
+    ``none`` keeps the key stable for the dense models that are all this has been calibrated
+    against; MoE tolerances are not yet measured."""
+
     @property
     def key(self) -> str:
-        return f"{self.quant}/{self.dtype}/{self.attn}"
+        # `experts` is appended only when set, so every existing dense profile key and every
+        # calibrated tolerance entry keeps its current value.
+        base = f"{self.quant}/{self.dtype}/{self.attn}"
+        return base if self.experts == "none" else f"{base}/{self.experts}"
 
     def __str__(self) -> str:
         return self.key

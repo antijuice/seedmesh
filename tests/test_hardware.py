@@ -164,3 +164,68 @@ def test_model_type_is_matched_case_insensitively():
 def test_a_config_with_no_model_type_is_rejected_not_assumed():
     with pytest.raises(UnsupportedModelError):
         check_model_supported(dict(BIG), "mystery/model")
+
+
+# ---- mixture-of-experts sizing ----------------------------------------------
+#
+# Exposed by the MoE spike. `params_per_block` counted one MLP, but a Mixtral block holds
+# `num_local_experts` copies of it (8) and a DeepSeek-V3 block holds 256 routed experts plus
+# shared ones. Sizing an MoE block as if it were dense understates it by 6-20x, and `probe`
+# would confidently tell a volunteer to host blocks that cannot fit.
+
+
+def test_experts_are_counted_not_ignored():
+    from seedmesh.cli.hardware import params_per_block
+
+    moe = {"hidden_size": 4096, "intermediate_size": 14336, "num_attention_heads": 32,
+           "num_key_value_heads": 8, "num_local_experts": 8}
+    dense = {k: v for k, v in moe.items() if k != "num_local_experts"}
+    assert params_per_block(moe) > 5 * params_per_block(dense)
+
+
+def test_deepseek_layer_sum_reproduces_the_published_total():
+    """The strongest available check that the analytic formula is right: 58 MoE layers plus
+    3 dense ones should add up to DeepSeek-V3's published 671B parameters."""
+    from seedmesh.cli.hardware import params_per_layer
+
+    cfg = {"hidden_size": 7168, "intermediate_size": 18432, "num_attention_heads": 128,
+           "num_key_value_heads": 128, "n_routed_experts": 256, "n_shared_experts": 1,
+           "moe_intermediate_size": 2048, "first_k_dense_replace": 3,
+           "moe_layer_freq": 1, "num_hidden_layers": 61}
+    total = sum(params_per_layer(cfg, i) for i in range(61))
+    assert 0.95 * 671e9 < total < 1.05 * 671e9, f"{total/1e9:.0f}B vs published 671B"
+
+
+def test_dense_prefix_layers_are_not_sized_as_moe():
+    from seedmesh.cli.hardware import is_moe_layer, params_per_layer
+
+    cfg = {"hidden_size": 7168, "intermediate_size": 18432, "num_attention_heads": 128,
+           "num_key_value_heads": 128, "n_routed_experts": 256, "n_shared_experts": 1,
+           "moe_intermediate_size": 2048, "first_k_dense_replace": 3, "num_hidden_layers": 61}
+    assert not is_moe_layer(cfg, 0) and is_moe_layer(cfg, 3)
+    assert params_per_layer(cfg, 10) > 10 * params_per_layer(cfg, 0)
+
+
+def test_plan_sizes_against_the_largest_layer_not_the_smallest():
+    """A volunteer does not choose their block range, so a plan that fits only the dense
+    prefix is a plan that OOMs on assignment."""
+    from seedmesh.cli.hardware import GpuInfo, plan_blocks
+
+    cfg = {"hidden_size": 7168, "intermediate_size": 18432, "num_attention_heads": 128,
+           "num_key_value_heads": 128, "n_routed_experts": 256, "n_shared_experts": 1,
+           "moe_intermediate_size": 2048, "first_k_dense_replace": 3, "num_hidden_layers": 61}
+    gpu = GpuInfo(name="test", total_bytes=24 * 2**30, free_bytes=24 * 2**30,
+                  compute_capability="8.6")
+    plan = plan_blocks(cfg, gpu, quant="nf4")
+    # The MoE layer is ~11.5B params; at NF4 that is ~5.9 GB, so 24 GB cannot hold many.
+    assert plan.params_per_block > 10e9, "sized against a dense layer by mistake"
+    assert plan.recommended_blocks <= 4
+
+
+def test_dense_models_are_unaffected():
+    from seedmesh.cli.hardware import params_per_block, params_per_layer
+
+    llama = {"hidden_size": 128, "intermediate_size": 256, "num_attention_heads": 8,
+             "num_key_value_heads": 2, "num_hidden_layers": 4}
+    assert params_per_block(llama) == 139_520
+    assert params_per_layer(llama, 0) == 139_520

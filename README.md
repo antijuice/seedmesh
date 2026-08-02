@@ -151,6 +151,7 @@ ASNs defeats the anti-sybil rules. A caught peer can discard its identity and re
 | [threat-model.md](docs/threat-model.md) | Defended, not defended, open questions |
 | [security-privacy.md](docs/security-privacy.md) | For volunteers and for users |
 | [findings-upstream-audit.md](docs/findings-upstream-audit.md) | Verified state of Petals and hivemind |
+| [findings-moe.md](docs/findings-moe.md) | Can this carry a trillion-parameter MoE? Measured |
 | [GOVERNANCE.md](GOVERNANCE.md) | Who decides what, and the non-monetization pledge |
 
 ## Backend status

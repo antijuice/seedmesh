@@ -1,12 +1,13 @@
 """``seedmesh`` command line.
 
-Five commands, aimed at the two things a volunteer actually does -- find out what they can
+Six commands, aimed at the two things a volunteer actually does -- find out what they can
 contribute, and contribute it:
 
     seedmesh setup      install and patch the Petals backend
     seedmesh probe      what can this machine host?
     seedmesh serve      host blocks for a swarm
     seedmesh bootstrap  run the rendezvous peer a swarm needs
+    seedmesh doctor     can this machine host, and if not why
     seedmesh chat       talk to a swarm
 
 `simulate` remains for developing the trust layer against adversarial scenarios without any
@@ -736,6 +737,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="anything after a bare '--' goes to petals.cli.run_dht verbatim",
     )
 
+    doctor = subparsers.add_parser(
+        "doctor", help="can this machine host? and if not, exactly why"
+    )
+    doctor.add_argument("--initial-peers", "--initial_peers", nargs="+", default=None)
+    doctor.add_argument("--swarm-file", "--swarm_file", default=None)
+    doctor.add_argument("--port", type=int, default=31338,
+                        help="port to listen on while testing; use the one you would serve on")
+    doctor.add_argument("--timeout", type=float, default=120.0,
+                        help="how long to wait for a public address to be observed")
+
     chat = subparsers.add_parser("chat", help="talk to a swarm")
     chat.add_argument("--model", default=DEFAULT_MODEL)
     chat.add_argument("--initial-peers", "--initial_peers", nargs="+", default=None)
@@ -770,6 +781,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.petals_dir is None:
             args.petals_dir = str(DEFAULT_DIR)
         return cmd_setup(args)
+
+    if args.command == "doctor":
+        from seedmesh.cli.doctor import cmd_doctor
+
+        return cmd_doctor(args)
 
     return {
         "probe": _cmd_probe,

@@ -174,7 +174,8 @@ resumed. Send the prompt again.
 **`No GPU detected and --num-blocks not given`** — `probe` found no CUDA device. You can
 still use a swarm as a client.
 
-**Server starts, then nobody can reach it** — count your bootstrap peers first. Fewer than
+**Server starts, then nobody can reach it** — run `seedmesh doctor`, which answers this
+directly instead of leaving you to infer it. Otherwise: count your bootstrap peers first. Fewer than
 four and your machine never learns its own public address, so it advertises nothing dialable.
 That is the cause far more often than the router is. If you do have four and it still fails,
 your NAT is probably symmetric or you are behind CGNAT; forward the port. See

@@ -310,3 +310,58 @@ anyone. This is a source-derived prediction, not yet measured; DCUtR must still 
 real NATs, and symmetric NAT or CGNAT can defeat it regardless. Note also
 `maxObservedAddrsPerIPAndTransport = 2`, so four peers sharing one IP may not count as four
 observers.
+
+## Hole punching cannot rescue a symmetric NAT — and that is by design
+
+Traced through go-libp2p v0.32.1 after a real hole punch failed with
+`protocols not supported: [/libp2p/dcutr]`.
+
+It is tempting to read that as a registration bug, since `holepunch/svc.go:111` registers the
+`/libp2p/dcutr` handler **inside** the public-address gate — a peer that never observes one
+never registers the handler, so it cannot even respond to a punch initiated by a peer that
+has. Fixing that looked like the way to support symmetric-NAT volunteers.
+
+It is not, and the source says so plainly. `holepuncher.go:215`:
+
+```go
+if len(obsAddrs) == 0 {
+    return nil, nil, 0, errors.New("aborting hole punch initiation as we have no public address")
+}
+```
+
+and the responder sends `ownAddrs = removeRelayAddrs(OwnObservedAddrs())` — empty if it has
+none. **Both roles require the peer to know its own public address.** Registering the handler
+unconditionally would open the stream and then fail one step later with nothing to dial.
+
+So a symmetric NAT is a hard limit, not a bug:
+
+| | |
+| --- | --- |
+| symmetric NAT assigns a different external port per destination | so four observers report four different addresses |
+| `ActivationThresh = 4` never met | so no public address is accepted |
+| no public address | so DCUtR refuses in both roles |
+| only the relay remains | severed at 128 KiB — under one request for a real model |
+
+**Such a volunteer needs a port forward to host anything larger than a demo.** They can still
+use the swarm as a client with no changes. Say this to volunteers rather than implying hole
+punching will sort it out.
+
+## `seedmesh doctor` — find out which case you are in
+
+```bash
+seedmesh doctor
+```
+
+Listens on a real port, connects to the swarm's bootstrap peers, and waits to see whether any
+public address is observed for this host. Reports one of:
+
+- **reachable** — a public address was learned; you can host any model size
+- **symmetric-nat** — enough peers, enough time, no agreement; port forward or client-only
+- **too-few-peers** — fewer than four bootstraps, which is the swarm's problem, not yours
+- **still-waiting** — the check was cut short; it deliberately will not call your NAT broken
+  on incomplete evidence
+
+It must listen to answer this. An earlier version opened the DHT in client mode, which makes
+hivemind pass `-noListenAddrs=1`, so the host had nothing to be dialled on and the check
+reported `symmetric-nat` for a machine already proven directly reachable. Verified against
+that same machine: it now reports `reachable  66.31.117.31:31339`.

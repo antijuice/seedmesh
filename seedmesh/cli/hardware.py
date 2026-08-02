@@ -115,6 +115,12 @@ def params_per_block(config: dict) -> int:
 
     Exact for Llama-family architectures (checked against a real block: a 128-hidden /
     256-intermediate / 8-head / 2-kv-head config gives 139,520 both ways).
+
+    Mixture-of-experts models are handled explicitly, because ignoring the experts is not a
+    small error. A Mixtral block holds ``num_local_experts`` copies of the MLP -- 8x -- and
+    a DeepSeek-V3-class block holds 256. Sizing one as if it were dense understates it by
+    two orders of magnitude, and ``probe`` would confidently tell a volunteer to host blocks
+    that cannot fit.
     """
     hidden = int(config["hidden_size"])
     intermediate = int(config["intermediate_size"])
@@ -126,9 +132,49 @@ def params_per_block(config: dict) -> int:
     k = hidden * kv_heads * head_dim
     v = k
     o = heads * head_dim * hidden
-    mlp = 3 * hidden * intermediate
     norms = 2 * hidden
+
+    # Experts, if any. `num_local_experts` is Mixtral's spelling, `n_routed_experts`
+    # DeepSeek-V3's. Each routed expert is a full gate/up/down MLP; DeepSeek additionally
+    # keeps `n_shared_experts` always-on ones at `moe_intermediate_size`.
+    n_routed = int(config.get("num_local_experts") or config.get("n_routed_experts") or 0)
+    if n_routed:
+        moe_intermediate = int(config.get("moe_intermediate_size") or intermediate)
+        experts = n_routed * 3 * hidden * moe_intermediate
+        shared = int(config.get("n_shared_experts") or 0) * 3 * hidden * moe_intermediate
+        router = hidden * n_routed
+        mlp = experts + shared + router
+    else:
+        mlp = 3 * hidden * intermediate
+
     return q + k + v + o + mlp + norms
+
+
+def is_moe_layer(config: dict, layer_index: int) -> bool:
+    """Is this specific layer a mixture-of-experts layer?
+
+    Blocks are not uniform in this family. DeepSeek-V3 sets ``first_k_dense_replace = 3``:
+    the first three layers are ordinary dense MLPs and the remaining 58 are MoE, so a block
+    plan that assumes one size is wrong for every layer it is applied to.
+    """
+    if not (config.get("num_local_experts") or config.get("n_routed_experts")):
+        return False
+    first_dense = int(config.get("first_k_dense_replace") or 0)
+    if layer_index < first_dense:
+        return False
+    # `moe_layer_freq` of N means every Nth layer past the dense prefix is MoE (1 = all).
+    freq = int(config.get("moe_layer_freq") or 1)
+    return freq <= 1 or (layer_index - first_dense) % freq == 0
+
+
+def params_per_layer(config: dict, layer_index: int) -> int:
+    """Parameter count of one *specific* layer, respecting dense/MoE mixing."""
+    if is_moe_layer(config, layer_index):
+        return params_per_block(config)
+    dense = dict(config)
+    for key in ("num_local_experts", "n_routed_experts", "n_shared_experts"):
+        dense.pop(key, None)
+    return params_per_block(dense)
 
 
 def plan_blocks(
@@ -143,14 +189,21 @@ def plan_blocks(
     if quant not in BYTES_PER_PARAM:
         raise ValueError(f"unknown quantization {quant!r}; expected one of {sorted(BYTES_PER_PARAM)}")
 
-    per_block = params_per_block(config)
+    # Size against the LARGEST layer, not an average. Blocks are not uniform in MoE models
+    # (DeepSeek-V3: 3 dense then 58 MoE, a 19x difference), and a volunteer does not choose
+    # which block range they are assigned -- so a plan that fits only the small ones is a
+    # plan that OOMs. For dense models every layer is identical and this is a no-op.
+    n_layers = int(config.get("num_hidden_layers", 0))
+    if n_layers:
+        per_block = max(params_per_layer(config, i) for i in range(n_layers))
+    else:
+        per_block = params_per_block(config)
     bytes_per_block = int(per_block * BYTES_PER_PARAM[quant])
 
     if reserve_bytes is None:
         reserve_bytes = max(MIN_RESERVE_BYTES, int(gpu.total_bytes * RESERVE_FRACTION))
     usable = max(0, gpu.free_bytes - reserve_bytes)
 
-    n_layers = int(config.get("num_hidden_layers", 0))
     fits = usable // bytes_per_block if bytes_per_block else 0
     recommended = int(min(fits, n_layers)) if n_layers else int(fits)
 

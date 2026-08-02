@@ -21,7 +21,7 @@ def test_all_commands_are_registered(parser):
     actions = [a for a in parser._actions if a.dest == "command"]
     assert actions, "no subcommand group"
     assert set(actions[0].choices) == {
-        "setup", "probe", "serve", "bootstrap", "chat", "simulate",
+        "setup", "probe", "serve", "bootstrap", "doctor", "chat", "simulate",
     }
 
 
@@ -586,3 +586,71 @@ def test_serve_and_chat_accept_a_swarm_file(parser):
     for sub in ("serve", "chat"):
         args = parser.parse_args([sub, "--swarm-file", "/tmp/x.json"])
         assert args.swarm_file == "/tmp/x.json"
+
+
+# ---- doctor ------------------------------------------------------------------
+#
+# Exists because the failure it detects is silent. A volunteer behind a symmetric NAT starts
+# a server, sees no errors, and hosts blocks nobody can reach. Traced through go-libp2p
+# v0.32.1: without four peers agreeing on one observed address, no public address is
+# accepted (identify/obsaddr.go ActivationThresh=4); without a public address the dcutr
+# handler is never registered (holepunch/svc.go:111) AND initiation is refused outright
+# (holepuncher.go:215). So hole punching cannot rescue such a peer in either role, and the
+# only remaining path is a relay severed at 128 KiB.
+
+
+def test_addresses_are_classified(parser):
+    from seedmesh.cli.doctor import Address
+
+    assert Address("127.0.0.1", 1).kind == "loopback"
+    assert Address("10.0.0.155", 1).kind == "private"
+    assert Address("192.168.1.5", 1).kind == "private"
+    assert Address("66.31.117.31", 1).kind == "public"
+
+
+def test_addresses_are_parsed_from_multiaddrs():
+    from seedmesh.cli.doctor import parse_addresses
+
+    found = parse_addresses([
+        "/ip4/127.0.0.1/tcp/31338/p2p/QmXXX",
+        "/ip4/66.31.117.31/tcp/31338",
+        "/ip6/::1/tcp/999",  # ignored: the diagnosis is about IPv4 NAT
+    ])
+    assert [(a.ip, a.port) for a in found] == [("127.0.0.1", 31338), ("66.31.117.31", 31338)]
+
+
+def test_a_public_address_means_this_host_can_serve_large_models():
+    from seedmesh.cli.doctor import Address, diagnose
+
+    result = diagnose([Address("10.0.0.155", 31338), Address("66.31.117.31", 31338)],
+                      n_peers=4, waited=10, timeout=120)
+    assert result.verdict == "reachable"
+    assert result.can_host_large_models
+
+
+def test_too_few_peers_is_blamed_on_the_swarm_not_the_volunteer():
+    """Below four observers no NAT can succeed, so this is not the user's network."""
+    from seedmesh.cli.doctor import Address, diagnose
+
+    result = diagnose([Address("10.0.0.155", 31338)], n_peers=2, waited=120, timeout=120)
+    assert result.verdict == "too-few-peers"
+    assert "not a problem with your network" in result.detail
+
+
+def test_symmetric_nat_is_named_with_a_remedy():
+    from seedmesh.cli.doctor import Address, diagnose
+
+    result = diagnose([Address("10.0.0.155", 31338)], n_peers=4, waited=120, timeout=120)
+    assert result.verdict == "symmetric-nat"
+    assert not result.can_host_large_models
+    assert "128 KiB" in result.detail, "say why a relay will not save them"
+    assert "--host-maddrs" in result.detail, "and give the command that does work"
+    assert "USE the swarm as a client" in result.detail, "they are not shut out entirely"
+
+
+def test_an_interrupted_wait_is_not_diagnosed_as_symmetric_nat():
+    """Calling someone's NAT broken on incomplete evidence is worse than saying nothing."""
+    from seedmesh.cli.doctor import Address, diagnose
+
+    result = diagnose([Address("10.0.0.155", 31338)], n_peers=4, waited=12, timeout=120)
+    assert result.verdict == "still-waiting"

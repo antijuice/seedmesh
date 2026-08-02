@@ -88,6 +88,7 @@ HIVEMIND_IMPORT_RE = re.compile(
 )
 
 PORTED_BLOCK = Path(__file__).resolve().parents[1] / "spike" / "transformers_port" / "ported_block.py"
+PORTED_MIXTRAL_BLOCK = Path(__file__).resolve().parents[1] / "spike" / "moe" / "ported_mixtral_block.py"
 
 HF_COMPAT_MODULE = '''"""Shims for transformers APIs Petals used that current versions removed.
 
@@ -325,6 +326,174 @@ def apply_block_port(root: Path, write: bool) -> str:
     return "OK    llama block replaced with the delegating port"
 
 
+CACHE_SIZING_ORIGINAL = """        cache_values_per_block = 2 * self.block_config.hidden_size * attn_cache_tokens
+        cache_values_per_block //= self.block_config.num_key_value_groups
+"""
+
+CACHE_SIZING_PATCHED = '        # Seedmesh: size the attention cache from what attention actually stores.\n        #\n        # `2 * hidden_size // num_key_value_groups` is correct for MHA and GQA, because\n        # there kv_heads * head_dim == hidden_size // groups. Multi-head latent attention\n        # (DeepSeek-V3, Kimi K2) breaks that identity: transformers decompresses the latent\n        # back to full K/V before caching.\n        #\n        # K and V are NOT the same width there -- measured in spike/moe/probe_mla_shapes.py,\n        # a tiny config gave key (1,4,6,24) and value (1,4,6,16). So the per-token width is\n        # heads * (qk_nope + qk_rope + v_head_dim), not twice either one.\n        #\n        # Under-reserving is the dangerous direction: the server accepts sessions it cannot\n        # finish and OOMs mid-request, which the swarm reads as an unreliable peer rather\n        # than a misconfigured one.\n        _qk_nope = getattr(self.block_config, "qk_nope_head_dim", None)\n        _qk_rope = getattr(self.block_config, "qk_rope_head_dim", None)\n        if _qk_nope is not None and _qk_rope is not None:\n            _v_dim = getattr(self.block_config, "v_head_dim", _qk_nope)\n            _cache_width = self.block_config.num_attention_heads * (_qk_nope + _qk_rope + _v_dim)\n            cache_values_per_block = _cache_width * attn_cache_tokens\n        else:\n            cache_values_per_block = 2 * self.block_config.hidden_size * attn_cache_tokens\n            cache_values_per_block //= self.block_config.num_key_value_groups\n'
+
+CACHE_DESCRIPTORS_ORIGINAL = '        head_dim = self.config.hidden_size // self.config.num_attention_heads\n        cache_tensors = []\n        for device, num_heads in zip(self.module.devices, self.shard_num_heads):\n            num_heads //= self.config.num_key_value_groups\n            if hasattr(self.config, "num_key_value_heads"):\n                num_heads = self.config.num_key_value_heads\n            keys = TensorDescriptor((batch_size, num_heads, head_dim, max_length), dtype=self.dtype, device=device)\n            values = TensorDescriptor((batch_size, num_heads, max_length, head_dim), dtype=self.dtype, device=device)\n            cache_tensors.extend((keys, values))\n        return cache_tensors\n'
+
+CACHE_DESCRIPTORS_PATCHED = '        # Seedmesh: K and V are not always the same width.\n        #\n        # Standard attention stores both at hidden_size // num_attention_heads. Multi-head\n        # latent attention (DeepSeek-V3, Kimi K2) stores K at qk_nope_head_dim +\n        # qk_rope_head_dim and V at v_head_dim -- measured directly in\n        # spike/moe/probe_mla_shapes.py, where a tiny config gave key (1,4,6,24) and value\n        # (1,4,6,16). The original code derives one head_dim from hidden_size and applies it\n        # to both, which for DeepSeek-V3 means allocating 56-wide tensors for 192- and\n        # 128-wide data.\n        _qk_nope = getattr(self.config, "qk_nope_head_dim", None)\n        _qk_rope = getattr(self.config, "qk_rope_head_dim", None)\n        _is_mla = _qk_nope is not None and _qk_rope is not None\n        if _is_mla:\n            key_dim = _qk_nope + _qk_rope\n            value_dim = getattr(self.config, "v_head_dim", key_dim)\n        else:\n            key_dim = value_dim = self.config.hidden_size // self.config.num_attention_heads\n\n        cache_tensors = []\n        for device, num_heads in zip(self.module.devices, self.shard_num_heads):\n            if _is_mla:\n                # MLA has no grouped-query sharing: every head keeps its own K/V.\n                num_heads = self.config.num_attention_heads\n            else:\n                num_heads //= self.config.num_key_value_groups\n                if hasattr(self.config, "num_key_value_heads"):\n                    num_heads = self.config.num_key_value_heads\n            keys = TensorDescriptor((batch_size, num_heads, key_dim, max_length), dtype=self.dtype, device=device)\n            values = TensorDescriptor((batch_size, num_heads, max_length, value_dim), dtype=self.dtype, device=device)\n            cache_tensors.extend((keys, values))\n        return cache_tensors\n'
+
+
+DEEPSEEK_SUBPACKAGE = Path(__file__).resolve().parents[1] / "spike" / "moe" / "deepseek_v3"
+
+MODELS_INIT_ORIGINAL = "from petals.models.mixtral import *\n"
+MODELS_INIT_PATCHED = (
+    "from petals.models.mixtral import *\n"
+    "from petals.models.deepseek_v3 import *  # Seedmesh: DeepSeek-V3 / Kimi K2\n"
+)
+
+
+def apply_deepseek_subpackage(root: Path, write: bool) -> str:
+    """Add petals/models/deepseek_v3/, the architecture large open MoEs now follow.
+
+    transformers implements deepseek_v3 natively, so this needs no trust_remote_code -- which
+    matters because Petals imports the decoder-layer class directly, and trust_remote_code
+    would mean every volunteer executing code from a model repo.
+    """
+    if not DEEPSEEK_SUBPACKAGE.is_dir():
+        return f"SKIP  subpackage source missing at {DEEPSEEK_SUBPACKAGE}"
+
+    target_dir = root / "src" / "petals" / "models" / "deepseek_v3"
+    sources = sorted(DEEPSEEK_SUBPACKAGE.glob("*.py"))
+    if not sources:
+        return "SKIP  no .py files in the subpackage source"
+
+    changed = []
+    for source in sources:
+        target = target_dir / source.name
+        wanted = source.read_text(encoding="utf-8")
+        if target.exists() and target.read_text(encoding="utf-8") == wanted:
+            continue
+        changed.append(source.name)
+        if write:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target.write_text(wanted, encoding="utf-8")
+
+    init = root / "src" / "petals" / "models" / "__init__.py"
+    init_source = init.read_text(encoding="utf-8") if init.exists() else ""
+    needs_import = "deepseek_v3" not in init_source
+    if needs_import:
+        if MODELS_INIT_ORIGINAL not in init_source:
+            return "SKIP  models/__init__.py does not match the expected form"
+        changed.append("__init__ import")
+        if write:
+            init.write_text(
+                init_source.replace(MODELS_INIT_ORIGINAL, MODELS_INIT_PATCHED), encoding="utf-8"
+            )
+
+    if not changed:
+        return "OK    deepseek_v3 subpackage already installed"
+    return f"OK    deepseek_v3 subpackage installed ({len(changed)} file(s))"
+
+
+def apply_kimi_k2_mapping(root: Path, write: bool) -> str:
+    """Register kimi_k2 as an alias for deepseek_v3.
+
+    Kimi K2's config says `model_type: kimi_k2` but `architectures:
+    ["DeepseekV3ForCausalLM"]`. Petals dispatches on model_type, so without an alias a
+    trillion-parameter model that is byte-for-byte a DeepSeek-V3 is refused with
+    "Petals does not support model type kimi_k2".
+    """
+    target = root / "src" / "petals" / "models" / "deepseek_v3" / "__init__.py"
+    if not target.exists():
+        return "SKIP  deepseek_v3 subpackage not installed yet"
+    source = target.read_text(encoding="utf-8")
+    if "kimi_k2" in source:
+        return "OK    kimi_k2 alias already registered"
+
+    alias = '''
+
+# Seedmesh: Kimi K2 declares model_type "kimi_k2" while its architectures field says
+# DeepseekV3ForCausalLM -- the same implementation under a different name. Petals dispatches
+# on model_type, so without this alias a trillion-parameter model that is byte-for-byte a
+# DeepSeek-V3 is refused. Registered defensively: a future transformers release may add
+# kimi_k2 natively, and registering a duplicate raises.
+try:
+
+    class DistributedKimiK2Config(DistributedDeepseekV3Config):
+        model_type = "kimi_k2"
+
+    register_model_classes(
+        config=DistributedKimiK2Config,
+        model=DistributedDeepseekV3Model,
+        model_for_causal_lm=DistributedDeepseekV3ForCausalLM,
+    )
+except AssertionError:  # already registered upstream
+    pass
+'''
+    if write:
+        target.write_text(source + alias, encoding="utf-8")
+    return "OK    kimi_k2 registered as a deepseek_v3 alias"
+
+
+def apply_mla_cache_descriptors(root: Path, write: bool) -> str:
+    """Allocate attention-cache tensors at the widths MLA actually uses.
+
+    `get_inference_cache_descriptors` derives a single head_dim from hidden_size and gives
+    K and V the same width. Measured for DeepSeek-V3: K is 192 wide, V is 128, and
+    hidden_size // heads is 56 -- so all three disagree.
+    """
+    target = root / "src" / "petals" / "server" / "backend.py"
+    if not target.exists():
+        return f"SKIP  {target} not found"
+    source = target.read_text(encoding="utf-8")
+    if "_is_mla" in source:
+        return "OK    MLA cache descriptors already applied"
+    if CACHE_DESCRIPTORS_ORIGINAL not in source:
+        return "SKIP  cache descriptor block not found (upstream changed?)"
+    if write:
+        target.write_text(
+            source.replace(CACHE_DESCRIPTORS_ORIGINAL, CACHE_DESCRIPTORS_PATCHED), encoding="utf-8"
+        )
+    return "OK    attention cache descriptors widened for MLA"
+
+
+def apply_mla_cache_sizing(root: Path, write: bool) -> str:
+    """Size the attention cache correctly for multi-head latent attention.
+
+    Petals assumes kv_heads * head_dim == hidden_size // num_key_value_groups, which holds
+    for MHA and GQA but not MLA. Measured (spike/moe/probe_cache_size.py, bf16, per token
+    per layer): Llama-3.1-8B 4,096 B reserved vs 4,096 needed (correct); DeepSeek-V3
+    28,672 reserved vs 98,304 needed; Kimi K2 28,672 vs 49,152.
+    """
+    target = root / "src" / "petals" / "server" / "server.py"
+    if not target.exists():
+        return f"SKIP  {target} not found"
+    source = target.read_text(encoding="utf-8")
+    if "_qk_nope" in source:
+        return "OK    MLA cache sizing already applied"
+    if CACHE_SIZING_ORIGINAL not in source:
+        return "SKIP  cache sizing block not found (upstream changed?)"
+    if write:
+        target.write_text(source.replace(CACHE_SIZING_ORIGINAL, CACHE_SIZING_PATCHED), encoding="utf-8")
+    return "OK    attention cache sized for MLA as well as GQA"
+
+
+def apply_mixtral_block_port(root: Path, write: bool) -> str:
+    """Port WrappedMixtralBlock, for the same reason the Llama block needed porting.
+
+    Mixtral is the only mixture-of-experts architecture Petals registers, so this is the
+    whole basis for hosting an MoE. Upstream's wrapper passes `position_ids` but never builds
+    `position_embeddings`, which transformers has required since 4.48 -- it dies on the first
+    forward with `cannot unpack non-iterable NoneType object`.
+    """
+    target = root / "src" / "petals" / "models" / "mixtral" / "block.py"
+    if not target.exists():
+        return f"SKIP  {target} not found"
+    if not PORTED_MIXTRAL_BLOCK.exists():
+        return f"SKIP  ported mixtral block missing at {PORTED_MIXTRAL_BLOCK}"
+
+    ported = PORTED_MIXTRAL_BLOCK.read_text(encoding="utf-8")
+    if target.read_text(encoding="utf-8") == ported:
+        return "OK    mixtral block already ported"
+    if write:
+        target.write_text(ported, encoding="utf-8")
+    return "OK    mixtral block replaced with the delegating port"
+
+
 def apply_hf_compat(root: Path, write: bool) -> str:
     """Install the transformers compat shim and repoint every importer of it.
 
@@ -490,6 +659,11 @@ def main() -> int:
     attr_files, attr_rewrites = apply_attribute_fix(root, write)
     print(f"OK    {attr_rewrites} attribute access(es) across {attr_files} file(s)")
     print(apply_block_port(root, write))
+    print(apply_mixtral_block_port(root, write))
+    print(apply_mla_cache_sizing(root, write))
+    print(apply_mla_cache_descriptors(root, write))
+    print(apply_deepseek_subpackage(root, write))
+    print(apply_kimi_k2_mapping(root, write))
     print(apply_num_heads_fix(root, write))
     print(apply_hf_compat(root, write))
     print(apply_attn_publication(root, write))
