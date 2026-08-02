@@ -784,3 +784,34 @@ def test_the_packaged_swarm_defaults_to_the_small_model_and_offers_the_big_one()
     assert swarm.model == "JackFram/llama-160m"
     assert "8b" in swarm.models
     assert swarm.models["8b"].attn_cache_tokens == 4096
+
+
+# ---- --public-ip: reachability without router access -------------------------
+#
+# Petals decides relay-vs-direct with a startup check that runs before the NAT mapping has
+# been observed by anyone, so on an endpoint-independent NAT it concludes "relayed" and then
+# advertises only circuit addresses -- even though `seedmesh doctor`, which waits for four
+# peers to agree, reports the host as reachable. This is how a volunteer acts on doctor's
+# answer when they cannot get into their router.
+
+
+def test_serve_port_is_read_from_host_maddrs(parser):
+    from seedmesh.cli.main import _serve_port
+
+    args = parser.parse_args(["serve", "--host-maddrs", "/ip4/0.0.0.0/tcp/31338"])
+    assert _serve_port(args) == 31338
+
+
+def test_an_ephemeral_port_is_not_usable_for_announcing(parser):
+    from seedmesh.cli.main import _serve_port
+
+    # Advertising a port the kernel picked at random sends every dialer to nothing.
+    assert _serve_port(parser.parse_args(["serve"])) is None
+    assert _serve_port(parser.parse_args(
+        ["serve", "--host-maddrs", "/ip4/0.0.0.0/tcp/0"])) is None
+
+
+def test_public_ip_is_accepted_with_its_underscore_spelling(parser):
+    a = parser.parse_args(["serve", "--public_ip", "66.31.117.31"])
+    b = parser.parse_args(["serve", "--public-ip", "66.31.117.31"])
+    assert a.public_ip == b.public_ip == "66.31.117.31"

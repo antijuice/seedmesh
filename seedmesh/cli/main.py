@@ -293,6 +293,23 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     # while the server allocates the default would OOM by exactly the amount we planned around.
     if args.attn_cache_tokens:
         command += ["--attn_cache_tokens", str(args.attn_cache_tokens)]
+    if args.public_ip:
+        # Petals decides relay-vs-direct with a reachability check at startup, before the
+        # NAT mapping has been observed by anyone -- so on an endpoint-independent NAT it
+        # concludes "relayed" and then advertises ONLY circuit addresses, even though the
+        # host is dialable. `seedmesh doctor` answers the same question properly, by waiting
+        # for four peers to agree, and this is how you act on that answer without a router.
+        #
+        # It needs a fixed port, since the advertised address must match the mapping.
+        port = _serve_port(args)
+        if port is None:
+            print("--public-ip needs a fixed port; add "
+                  "--host-maddrs /ip4/0.0.0.0/tcp/31338")
+            return 2
+        # NOT `--public_ip`: Petals expands that into `--port`, and asserts if
+        # `--host_maddrs` is also set. `--announce_maddrs` is what it expands to and
+        # composes with the listen address, which we need in order to bind 0.0.0.0.
+        command += ["--announce_maddrs", _announce_maddr(args.public_ip, port)]
     if args.public_name:
         command += ["--public_name", args.public_name]
     if args.host_maddrs:
@@ -312,6 +329,20 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
 
 # ---- bootstrap --------------------------------------------------------------
+
+
+def _serve_port(args) -> Optional[int]:
+    """The fixed TCP port this server will listen on, or None if it is ephemeral.
+
+    `--public_ip` advertises `/ip4/<ip>/tcp/<port>`, so the port has to be one a remote peer
+    can actually reach -- advertising a port the kernel picked at random would send every
+    dialer somewhere nothing is listening.
+    """
+    for maddr in args.host_maddrs or ():
+        match = re.search(r"/tcp/(\d+)", str(maddr))
+        if match and int(match.group(1)) != 0:
+            return int(match.group(1))
+    return None
 
 
 def _announce_maddr(ip: str, port: int) -> str:
@@ -826,6 +857,9 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--swarm-file", "--swarm_file", default=None,
                       help="JSON swarm definition (default: the packaged one)")
     serve.add_argument("--device", default=None)
+    serve.add_argument("--public-ip", "--public_ip", default=None,
+                       help="advertise this public address instead of falling back to relays; "
+                            "use the address `seedmesh doctor` reports")
     serve.add_argument("--public-name", "--public_name", default=None,
                        help="shown on the leaderboard")
     serve.add_argument("--host-maddrs", "--host_maddrs", nargs="+", default=None)
