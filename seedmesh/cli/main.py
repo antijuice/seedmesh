@@ -1,7 +1,7 @@
 """``seedmesh`` command line.
 
-Six commands, aimed at the two things a volunteer actually does -- find out what they can
-contribute, and contribute it:
+Seven commands, aimed at the things a volunteer actually does -- find out what they can
+contribute, contribute it, and see that it worked:
 
     seedmesh setup      install and patch the Petals backend
     seedmesh probe      what can this machine host?
@@ -9,6 +9,7 @@ contribute, and contribute it:
     seedmesh bootstrap  run the rendezvous peer a swarm needs
     seedmesh doctor     can this machine host, and if not why
     seedmesh chat       talk to a swarm
+    seedmesh monitor    who is donating what, and is the model covered
 
 `simulate` remains for developing the trust layer against adversarial scenarios without any
 backend at all.
@@ -810,6 +811,18 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--timeout", type=float, default=120.0,
                         help="how long to wait for a public address to be observed")
 
+    monitor = subparsers.add_parser(
+        "monitor", help="who is donating what, and is the model covered"
+    )
+    monitor.add_argument("--model", default=DEFAULT_MODEL)
+    monitor.add_argument("--initial-peers", "--initial_peers", nargs="+", default=None)
+    monitor.add_argument("--swarm-file", "--swarm_file", default=None)
+    monitor.add_argument("--watch", type=float, default=0.0,
+                         help="refresh every N seconds instead of printing once")
+    monitor.add_argument("--html", default=None,
+                         help="write a self-contained page to this path instead of printing")
+    monitor.add_argument("--json", action="store_true", help="machine-readable output")
+
     chat = subparsers.add_parser("chat", help="talk to a swarm")
     chat.add_argument("--model", default=DEFAULT_MODEL)
     chat.add_argument("--initial-peers", "--initial_peers", nargs="+", default=None)
@@ -854,6 +867,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         from seedmesh.cli.doctor import cmd_doctor
 
         return cmd_doctor(args)
+
+    if args.command == "monitor":
+        from seedmesh.cli.monitor import cmd_monitor
+
+        return cmd_monitor(args)
 
     return {
         "probe": _cmd_probe,
