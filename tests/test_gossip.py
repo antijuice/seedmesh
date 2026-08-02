@@ -393,3 +393,106 @@ def test_save_is_atomic(tmp_path):
     scorer.save(path)
     assert path.exists()
     assert not list(tmp_path.glob("*.tmp"))
+
+
+# ---- a DHT store that fails a third of the time ------------------------------
+#
+# Measured on the live four-peer swarm 2026-08-01: a client-mode `DHT.store` reaches no
+# remote peer on roughly 1 attempt in 3, scattered rather than clustered at startup. A
+# single-shot publish therefore drops about a third of gossip rounds -- and the first live
+# `seedmesh chat` run with reputation enabled reported "published 0" after two consecutive
+# failures on a short session.
+
+
+class FlakyDHT(FakeDHT):
+    """Fails the first `failures` store attempts, then behaves."""
+
+    def __init__(self, clock: ManualClock, failures: int) -> None:
+        super().__init__(clock)
+        self.remaining_failures = failures
+        self.attempts = 0
+
+    def publish(self, key, value, expiration_time, subkey=None) -> bool:
+        self.attempts += 1
+        if self.remaining_failures > 0:
+            self.remaining_failures -= 1
+            return False
+        return super().publish(key, value, expiration_time, subkey)
+
+
+def test_a_transient_store_failure_does_not_lose_the_round():
+    clock = ManualClock(1000.0)
+    dht = FlakyDHT(clock, failures=2)
+    node = make_node("a", clock, dht, seed=1)
+    observe(node.scorer, clock, "server-1")
+
+    record = node.publish()
+    assert record is not None
+    assert node.stats.published == 1
+    assert node.stats.publish_retries == 2
+    assert node.stats.publish_failures == 0
+
+
+def test_a_retried_publish_reuses_one_record_rather_than_re_signing():
+    """Re-signing per attempt would burn an epoch on every failure and put several
+    differently-signed records into circulation claiming the same observations."""
+    clock = ManualClock(1000.0)
+    dht = FlakyDHT(clock, failures=2)
+    node = make_node("a", clock, dht, seed=1)
+    observe(node.scorer, clock, "server-1")
+
+    record = node.publish()
+    assert record["epoch"] == 1
+    stored, _ = dht.store[node.key_for("a")]
+    assert stored["sig"] == record["sig"]
+
+
+def test_a_persistently_dead_store_is_reported_not_silent():
+    clock = ManualClock(1000.0)
+    dht = FlakyDHT(clock, failures=99)
+    node = make_node("a", clock, dht, seed=1)
+    observe(node.scorer, clock, "server-1")
+
+    assert node.publish() is None
+    assert node.stats.publish_failures == 1
+    # The point of counting it: "published 0" with no explanation looks like "nothing to say"
+    # when it actually means "the swarm never heard any of this".
+    assert any("round(s) lost" in line for line in node.describe())
+
+
+# ---- re-reading a record is not an attack ------------------------------------
+
+
+def test_re_reading_an_unchanged_record_is_not_counted_as_a_rejection():
+    clock = ManualClock(1000.0)
+    dht = FakeDHT(clock)
+    alice = make_node("alice", clock, dht, seed=1)
+    bob = make_node("bob", clock, dht, seed=2)
+    observe(alice.scorer, clock, "server-1")
+    alice.publish()
+
+    assert bob.fetch(["alice"]) == 1
+    assert bob.fetch(["alice"]) == 0  # still refused: ingesting twice would double the weight
+    assert bob.stats.unchanged == 1
+    assert bob.stats.rejected == 0
+    assert any("unchanged 1" in line for line in bob.describe())
+
+
+def test_an_actual_rollback_is_still_a_rejection():
+    """The relaxation is in reporting only. A lower epoch is a real replay attempt."""
+    clock = ManualClock(1000.0)
+    dht = FakeDHT(clock)
+    alice = make_node("alice", clock, dht, seed=1)
+    bob = make_node("bob", clock, dht, seed=2)
+
+    observe(alice.scorer, clock, "server-1")
+    alice.publish()
+    captured = dht.store[alice.key_for("alice")][0]
+    clock.advance(1.0)
+    alice.publish()  # epoch 2
+
+    bob.fetch(["alice"])  # ingests epoch 2
+    dht.store[alice.key_for("alice")] = (captured, clock.now() + 900.0)  # replay epoch 1
+    assert bob.fetch(["alice"]) == 0
+    assert bob.stats.rejected == 1
+    assert bob.stats.unchanged == 0

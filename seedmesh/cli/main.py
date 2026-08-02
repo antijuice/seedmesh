@@ -47,6 +47,10 @@ CHAT_ATTEMPTS = 4
 # per server. 5 minutes leaves headroom.
 CHAT_WARMUP_TIMEOUT = 300.0
 
+# Gossip cadence. Imported here rather than redefined so `--gossip-interval`'s default and
+# ClientReputation's stay the same number.
+from seedmesh.reputation.session import DEFAULT_SYNC_INTERVAL_S  # noqa: E402
+
 
 # ---- simulate ---------------------------------------------------------------
 
@@ -625,6 +629,16 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         dht.shutdown()
         return 1
 
+    # Start measuring only now. Attaching before the warm-up loop would score every server
+    # in the swarm as failing during the window where nothing is dialable yet -- a routing
+    # gap the servers did not cause, recorded against them permanently.
+    reputation = None
+    if not args.no_reputation:
+        try:
+            reputation = _start_reputation(args, dht, peers)
+        except Exception as exc:
+            print(f"  (reputation disabled: {type(exc).__name__}: {exc})")
+
     print("connected. Type a prompt, or Ctrl-C to quit.\n")
 
     try:
@@ -651,11 +665,60 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 print(explain_inference_failure(exc))
                 continue
             print(tokenizer.decode(outputs[0], skip_special_tokens=True) + "\n")
+            if reputation is not None:
+                reputation.maybe_sync()
     except KeyboardInterrupt:
         print()
     finally:
+        # Before the DHT closes: the final publish is what makes this session's measurements
+        # available to anyone else, and Ctrl-C is how a chat normally ends.
+        if reputation is not None:
+            reputation.close()
+            print("reputation:")
+            for line in reputation.describe():
+                print(line)
         dht.shutdown()
     return 0
+
+
+def _start_reputation(args: argparse.Namespace, dht, peers):
+    """Assemble the client-side reputation stack for a chat session.
+
+    Kept out of `_cmd_chat` because it is the one part of that function with anything to
+    test: the chat loop itself is `input()` and a model call.
+    """
+    from seedmesh.cli.state import load_or_create_identity, reputation_path
+    from seedmesh.cli.swarm import load_swarm
+    from seedmesh.reputation.session import for_dht
+
+    identity, created = load_or_create_identity()
+    swarm_name = "swarm"
+    try:
+        definition = load_swarm(args.swarm_file)
+        if definition is not None and definition.name:
+            swarm_name = definition.name
+    except Exception:
+        pass  # an unreadable swarm file already produced a message in resolve_peers
+
+    # Namespace both the file and the DHT keys by swarm. A peer id means nothing across
+    # swarms, so mixing two swarms' evidence would let a server carry a score it never
+    # earned here.
+    state = reputation_path(swarm_name)
+    reputation = for_dht(
+        dht,
+        identity=identity,
+        model_id=args.model,
+        state_path=state,
+        prefix=f"seedmesh/{swarm_name}",
+        sync_interval_s=args.gossip_interval,
+    )
+    reputation.attach()
+
+    if created:
+        print(f"created this node's signing identity (...{identity.peer_id[-8:]})")
+    if reputation.loaded:
+        print(f"recalled reputation for {reputation.loaded} peer(s) from {state}")
+    return reputation
 
 
 # ---- parser -----------------------------------------------------------------
@@ -757,6 +820,11 @@ def build_parser() -> argparse.ArgumentParser:
                       help="per-attempt timeout in seconds")
     chat.add_argument("--attempts", type=int, default=CHAT_ATTEMPTS,
                       help="retries with a fresh session when a request stalls")
+    chat.add_argument("--no-reputation", "--no_reputation", action="store_true",
+                      help="do not measure servers, and do not publish or fetch reputation")
+    chat.add_argument("--gossip-interval", "--gossip_interval", type=float,
+                      default=DEFAULT_SYNC_INTERVAL_S,
+                      help="seconds between reputation publish/fetch rounds")
 
     simulate = subparsers.add_parser(
         "simulate", help="run trust-layer scenarios against the swarm simulator"

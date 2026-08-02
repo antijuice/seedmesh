@@ -53,6 +53,15 @@ class RecordError(Exception):
     """Raised when a record is malformed, expired, replayed, or fails validation."""
 
 
+class UnchangedRecord(RecordError):
+    """A record already ingested, re-read before its author published a new one.
+
+    A subclass of RecordError so every existing caller keeps rejecting it -- this is not a
+    relaxation of the anti-replay rule. It exists only so callers that report to a human can
+    separate "nothing new yet" from "someone is feeding us bad records".
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class PeerReport:
     """One observer's summary of its experience with one subject."""
@@ -200,9 +209,18 @@ class EpochStore:
 
     def check_and_update(self, observer: PeerId, epoch: int) -> None:
         previous = self._highest.get(observer)
-        if previous is not None and epoch <= previous:
+        if previous is not None and epoch == previous:
+            # Benign and extremely common: an observer publishes every few minutes, and any
+            # reader polling faster than that re-reads the same record. Rejected all the
+            # same -- ingesting it twice would double that observer's weight -- but split
+            # out as its own type so a healthy swarm does not report a rising "rejected"
+            # count that reads like an attack.
+            raise UnchangedRecord(
+                f"unchanged batch from {observer}: epoch {epoch} already ingested"
+            )
+        if previous is not None and epoch < previous:
             raise RecordError(
-                f"stale or replayed batch from {observer}: epoch {epoch} <= seen {previous}"
+                f"stale or replayed batch from {observer}: epoch {epoch} < seen {previous}"
             )
         self._highest[observer] = epoch
 

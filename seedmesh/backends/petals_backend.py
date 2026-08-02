@@ -288,45 +288,23 @@ class PetalsBackend:
 
     # ---- reputation gossip transport -------------------------------------------
 
+    # The bodies moved to seedmesh/reputation/dht.py once `seedmesh chat` needed to gossip
+    # too -- it talks to Petals directly and never constructs a backend, so the transport
+    # could not stay a method here. These remain as the backend's stable surface.
+
     def dht_publish(
         self, key: str, value: dict, expiration_time: float, subkey: Optional[str] = None
     ) -> bool:
-        """Store a signed reputation record in the DHT.
+        """Store a signed reputation record in the DHT."""
+        from seedmesh.reputation.dht import dht_publish
 
-        Note what the DHT does *not* give us: on a default hivemind DHT any peer can
-        overwrite any key (measured in spike/hivemind_dht/). The Ed25519 signature inside
-        the record is what makes it trustworthy, not the slot it sits in.
-        """
-        try:
-            if subkey is not None:
-                return bool(
-                    self.dht.store(key, subkey=subkey, value=value, expiration_time=expiration_time)
-                )
-            return bool(self.dht.store(key, value, expiration_time=expiration_time))
-        except Exception:
-            return False
+        return dht_publish(self.dht, key, value, expiration_time, subkey)
 
     def dht_fetch(self, keys: list[str]) -> dict[str, Optional[dict]]:
         """Fetch reputation records by key, tolerating individual failures."""
-        results: dict[str, Optional[dict]] = {}
-        for key in keys:
-            try:
-                found = self.dht.get(key, latest=False)
-            except Exception:
-                found = None
-            if found is None:
-                results[key] = None
-                continue
-            value = found.value
-            # A subkeyed record comes back as {subkey: ValueWithExpiration}; unwrap the
-            # inner values so callers see plain dicts either way.
-            if isinstance(value, dict):
-                value = {
-                    subkey: (inner.value if hasattr(inner, "value") else inner)
-                    for subkey, inner in value.items()
-                }
-            results[key] = value
-        return results
+        from seedmesh.reputation.dht import dht_fetch
+
+        return dht_fetch(self.dht, keys)
 
     def make_gossip(self, identity, scorer, aggregator, **kwargs):
         """Build a :class:`ReputationGossip` bound to this backend's DHT."""

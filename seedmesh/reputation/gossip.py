@@ -55,12 +55,17 @@ from seedmesh.reputation.records import (
     EpochStore,
     PeerReport,
     RecordError,
+    UnchangedRecord,
     build_batch,
     verify_batch,
 )
 from seedmesh.reputation.scorer import ReputationScorer
 
 DEFAULT_TTL_S = 900.0
+
+# A client-mode DHT store reaches no remote peer about 1 attempt in 3 on the live swarm; see
+# ReputationGossip.publish. Four attempts puts the odds of losing a whole round at ~1%.
+PUBLISH_ATTEMPTS = 4
 
 
 class PublishFn(Protocol):
@@ -82,6 +87,13 @@ class GossipStats:
     fetched: int = 0
     accepted: int = 0
     rejected: int = 0
+    unchanged: int = 0
+    """Re-reads of a record already ingested. Counted apart from rejections: it is the
+    normal state of a swarm being polled faster than its observers publish, and folding it
+    into `rejected` would make a healthy swarm look under attack."""
+
+    publish_retries: int = 0
+    publish_failures: int = 0
     rejections: dict[str, int] = field(default_factory=dict)
 
     def note_rejection(self, reason: str) -> None:
@@ -190,8 +202,25 @@ class ReputationGossip:
         reports.sort(key=lambda r: -r.attempts)
         return reports[:MAX_REPORTS_PER_BATCH]
 
-    def publish(self) -> Optional[dict]:
-        """Sign and publish this node's observations. Returns the record, or None if empty."""
+    def publish(self, attempts: int = PUBLISH_ATTEMPTS) -> Optional[dict]:
+        """Sign and publish this node's observations. Returns the record, or None if empty.
+
+        Retried, because a failed store is transient rather than fatal. Measured against the
+        live four-peer swarm on 2026-08-01: a client-mode `DHT.store` reaches no remote peer
+        on roughly **1 attempt in 3** (8/12 succeeded, scattered, from the very first attempt
+        -- so it is not a warm-up effect). A single-shot publish therefore drops about a
+        third of all gossip rounds, and a short session can easily drop every one of them:
+        that is exactly what happened on the first live run, which reported "published 0"
+        after two consecutive failures.
+
+        The record is built once and re-stored unchanged. Re-signing at a new epoch per
+        attempt would burn epochs on failures and publish several distinct records claiming
+        the same observations.
+
+        A local read-back cannot be used to check any of this: hivemind answers a `get` for a
+        key this node stored from its own cache, so it returns the value whether or not it
+        ever left the machine.
+        """
         reports = self.build_reports()
         if not reports:
             return None  # nothing measured yet; publishing an empty record is just noise
@@ -200,15 +229,19 @@ class ReputationGossip:
         record = build_batch(
             self.identity, reports, epoch=self._epoch, clock=self.clock, ttl_s=self.ttl_s
         )
-        expiration = self.clock.now() + self.ttl_s
-        if self.publish_fn(key=self.key_for(self.transport_id), value=record,
-                           expiration_time=expiration):
-            self.stats.published += 1
-            self.stats.reports_published += len(reports)
-            # Only advertise once there is something worth fetching -- a directory full of
-            # observers with nothing to say costs every reader a lookup per round.
-            self.announce_self()
-            return record
+        key = self.key_for(self.transport_id)
+        for attempt in range(max(1, attempts)):
+            if self.publish_fn(
+                key=key, value=record, expiration_time=self.clock.now() + self.ttl_s
+            ):
+                self.stats.published += 1
+                self.stats.reports_published += len(reports)
+                self.stats.publish_retries += attempt
+                # Only advertise once there is something worth fetching -- a directory full
+                # of observers with nothing to say costs every reader a lookup per round.
+                self.announce_self()
+                return record
+        self.stats.publish_failures += 1
         return None
 
     # ---- fetching --------------------------------------------------------------
@@ -234,6 +267,9 @@ class ReputationGossip:
             self.stats.fetched += 1
             try:
                 batch = verify_batch(raw, clock=self.clock, epochs=self.epochs)
+            except UnchangedRecord:
+                self.stats.unchanged += 1
+                continue
             except RecordError as exc:
                 self.stats.note_rejection(str(exc))
                 continue
@@ -267,8 +303,14 @@ class ReputationGossip:
         stats = self.stats
         lines = [
             f"  published   {stats.published} record(s), {stats.reports_published} report(s)",
-            f"  fetched     {stats.fetched}, accepted {stats.accepted}, rejected {stats.rejected}",
+            f"  fetched     {stats.fetched}, accepted {stats.accepted}, "
+            f"unchanged {stats.unchanged}, rejected {stats.rejected}",
         ]
+        if stats.publish_retries or stats.publish_failures:
+            lines.append(
+                f"  DHT stores  {stats.publish_retries} retry(ies), "
+                f"{stats.publish_failures} round(s) lost"
+            )
         for reason, count in sorted(stats.rejections.items(), key=lambda kv: -kv[1]):
             lines.append(f"    rejected x{count}: {reason}")
         return lines

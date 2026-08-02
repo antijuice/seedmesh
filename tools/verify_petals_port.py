@@ -164,6 +164,24 @@ def main() -> int:
     for failure in broken:
         print(f"          {failure}")
 
+    # 8 -----------------------------------------------------------------------
+    # `seedmesh/reputation/observer.py` classifies a server's honest "I am full" refusal by
+    # matching this class name in the client's error text -- the exception type itself does
+    # not survive the process boundary. A rename upstream would silently reclassify honest
+    # backpressure as ERROR and start costing well-behaved operators reliability, which is
+    # invisible at runtime. Better to fail loudly here, at install time.
+    from seedmesh.reputation.observer import REFUSAL_MARKER
+
+    try:
+        import petals.server.memory_cache as memory_cache
+
+        present = hasattr(memory_cache, REFUSAL_MARKER)
+    except Exception as exc:
+        present = False
+        REFUSAL_MARKER = f"{REFUSAL_MARKER} (import failed: {exc})"  # noqa: F811
+    check(f"capacity-refusal marker '{REFUSAL_MARKER}' still exists", present,
+          "reputation would otherwise punish servers for honest backpressure")
+
     print()
     failures = sum(1 for _, passed, _ in RESULTS if not passed)
     print(f"{len(RESULTS) - failures}/{len(RESULTS)} checks passed")
