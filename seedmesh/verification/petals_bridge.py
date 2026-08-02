@@ -118,6 +118,15 @@ def make_address_resolver(sequence_manager) -> Callable[[], Dict[PeerId, str]]:
         first = address.split(".")[0]
         return (0 if first not in ("10", "127", "172", "192") else 1, address)
 
+    # Accumulated across calls, never recomputed from scratch. `list_peers` reports ONE
+    # address per peer and it is not reliably the path carrying data: measured 2026-08-02,
+    # a Colab client moved 402 KB/request to a server -- 3.1x the relay budget, so provably
+    # direct -- while `list_peers` showed only that peer's circuit address. A single
+    # observation therefore under-reports, and under-reporting means refusing to verify a
+    # peer that is in fact placeable. Remembering the best address ever seen fixes the
+    # common case (a connection that starts relayed and upgrades) without ever inventing one.
+    best: Dict[PeerId, str] = {}
+
     def resolve() -> Dict[PeerId, str]:
         found: Dict[PeerId, str] = {}
         try:
@@ -139,7 +148,8 @@ def make_address_resolver(sequence_manager) -> Callable[[], Dict[PeerId, str]]:
                     candidates.append(match.group(1))
             if candidates:
                 found[str(peer.peer_id)] = sorted(candidates, key=rank)[0]
-        return found
+        best.update(found)
+        return dict(best)
 
     return resolve
 

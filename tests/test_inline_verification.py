@@ -352,3 +352,47 @@ def test_a_relay_only_swarm_is_told_what_would_fix_it():
     text = "\n".join(verifier.describe())
     assert "belongs to the relay" in text
     assert "Port-forwarded servers can verify" in text
+
+
+def test_the_resolver_remembers_a_direct_address_once_seen(monkeypatch):
+    """`list_peers` reports ONE address per peer and it is not reliably the live path.
+
+    Measured 2026-08-02: a Colab client moved 402 KB/request to a server -- 3.1x the relay
+    budget, so provably direct -- while `list_peers` showed only that peer's circuit
+    address. A resolver that recomputes from scratch therefore forgets a direct address it
+    has already seen, and refuses to verify a peer that is genuinely placeable.
+    """
+    import seedmesh.verification.petals_bridge as bridge
+
+    class Worker:
+        @staticmethod
+        def run_coroutine(coro):
+            import asyncio
+
+            return asyncio.new_event_loop().run_until_complete(coro)
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "hivemind.moe.client.remote_expert_worker",
+        type("M", (), {"RemoteExpertWorker": Worker}),
+    )
+
+    direct = FakePeer("QmServer", ["/ip4/66.31.117.31/tcp/31338"])
+    circuit = FakePeer("QmServer", ["/ip4/143.244.144.71/tcp/31337/p2p/QmRelay/p2p-circuit"])
+
+    class Flipping:
+        """Reports direct once, then only the circuit address -- as observed live."""
+
+        def __init__(self):
+            self.calls = 0
+
+        async def list_peers(self):
+            self.calls += 1
+            return [direct] if self.calls == 1 else [circuit]
+
+    manager = FakeManager([])
+    manager.state.p2p = Flipping()
+    resolve = bridge.make_address_resolver(manager)
+
+    assert resolve() == {"QmServer": "66.31.117.31"}
+    assert resolve() == {"QmServer": "66.31.117.31"}, "forgot an address it had already seen"

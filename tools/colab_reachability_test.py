@@ -116,8 +116,10 @@ def report(label):
         print(f"  ...{peer_id[-8:]}  {kind:8s} {ip}")
         for addr in addrs[:3]:
             print(f"      {addr}")
-    print("  (RELAYED means the only address is a circuit -- the IP in it belongs to the")
-    print("   relay, so this peer cannot be placed on a network and cannot be verified)")
+    print("  NOTE: this label comes from `list_peers`, which reports ONE address per peer")
+    print("  and is NOT reliably the path carrying data -- measured 2026-08-02, a peer shown")
+    print("  here as RELAYED was simultaneously moving 402 KB/request, 3.1x the relay")
+    print("  budget, so provably direct. THE BYTE SWEEP BELOW IS THE AUTHORITY, not this.")
 
 
 # One warm-up request so a route exists and connections are established.
