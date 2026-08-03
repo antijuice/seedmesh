@@ -254,7 +254,12 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         print("It needs no --model: a DHT node relays discovery for any swarm.")
         return 2
 
-    if num_blocks is None:
+    # `--block-indices 0:9` already fixes the count, so auto-sizing is not merely redundant
+    # -- it fetches a config over the network and refuses to start if that fetch fails,
+    # turning an explicit instruction into an avoidable failure.
+    if args.block_indices:
+        num_blocks = None
+    elif num_blocks is None:
         gpus = detect_gpus()
         if not gpus:
             print("No GPU detected and --num-blocks not given; refusing to guess.")
@@ -328,6 +333,12 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         command += ["--host_maddrs", *args.host_maddrs]
     command += args.passthrough
 
+    # Clear servers left behind by a session that is no longer running. Petals runs a small
+    # process tree, and a closed terminal or `kill -9` leaves the children holding GPU memory
+    # and their DHT identity -- after which starting again fails or half-works. The remedy
+    # people learn is `pkill -f run_server`, which is a blunt instrument to hand a volunteer.
+    _clear_stale_servers(args.model, replace=args.replace)
+
     print(f"$ {' '.join(command)}\n")
     import subprocess
 
@@ -347,6 +358,32 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     finally:
         if watcher is not None:
             watcher.cancelled = True
+
+
+def _clear_stale_servers(model: str, *, replace: bool = False) -> None:
+    """Remove orphaned servers for this model. Never raises into the caller.
+
+    Orphaned only, unless `--replace`. Running two servers on purpose is legitimate and this
+    project does it -- one machine hosted blocks 9-32 while another hosted 0-9 -- so killing
+    every server for a model would be worse than the problem it solves.
+    """
+    if sys.platform == "win32":
+        return  # no /proc, and serve refuses on Windows anyway
+    try:
+        from seedmesh.cli import stale as stale_module
+
+        processes = stale_module.list_petals_servers()
+        leftovers = stale_module.stale_for(model, processes)
+        others = stale_module.others_for(model, processes)
+        if replace:
+            leftovers = leftovers + others
+            others = []
+        for line in stale_module.describe(leftovers, others):
+            print(line)
+        if leftovers:
+            stale_module.terminate(leftovers)
+    except Exception:
+        pass  # cleanup is a convenience; never let it stop a server from starting
 
 
 class _Watcher:
@@ -968,6 +1005,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--swarm-file", "--swarm_file", default=None,
                       help="JSON swarm definition (default: the packaged one)")
     serve.add_argument("--device", default=None)
+    serve.add_argument("--replace", action="store_true",
+                       help="also stop servers for this model that have a live parent")
     serve.add_argument("--no-visibility-check", "--no_visibility_check", action="store_true",
                        help="do not check whether the swarm can see this server")
     serve.add_argument("--block-indices", "--block_indices", default=None,

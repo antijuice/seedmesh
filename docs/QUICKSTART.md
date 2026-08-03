@@ -286,6 +286,13 @@ resumed. Send the prompt again.
 **`No GPU detected and --num-blocks not given`** — `probe` found no CUDA device. You can
 still use a swarm as a client.
 
+**A restarted server fails, or the GPU is still full** — leftover processes. Stopping
+`seedmesh serve` does not always stop the server: Petals runs a process tree, and a closed
+terminal or `kill -9` leaves the children holding GPU memory and their DHT identity.
+`seedmesh serve` now clears these automatically, but only the *orphaned* ones — a server
+whose parent is still alive belongs to somebody, and two servers on one model is a legitimate
+setup. Use `--replace` to stop those too.
+
 **`NOT VISIBLE after 180s` from your own server** — `serve` now checks whether the swarm can
 actually see you, because `Started` only means the local process came up. It says nothing
 about whether any record reached the DHT, and those failures look identical from your own

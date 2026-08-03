@@ -275,3 +275,48 @@ person's laptop being open. It is also the single point whose loss takes the swa
 until a new address is circulated — which is why the design treats bootstrap peers as  
 _entry points, not authority_: they hold no reputation state and cannot censor routing.  
 Running two, in different providers, removes even that. 
+
+## Recovering a bootstrap peer set up before the systemd instructions existed
+
+The first droplet in this swarm was started by hand, so `systemctl restart seedmesh-bootstrap`
+fails with `Unit seedmesh-bootstrap.service not found`. The host is fine; it just has no
+service.
+
+**Check the identity file first.** The peer id in everyone's `swarm.json` comes from
+`~/.seedmesh/bootstrap.key`. If that file is gone, restarting mints a *new* peer id and every
+volunteer's swarm file becomes wrong for that entry — so verify before starting anything:
+
+```bash
+ssh seedmesh@YOUR_DROPLET_IP 'ls -l ~/.seedmesh/bootstrap.key'
+```
+
+If it exists, create the service (as root) and it will come back with the same id:
+
+```bash
+ssh root@YOUR_DROPLET_IP 'PUBLIC_IP=$(curl -4 -s ifconfig.me); tee /etc/systemd/system/seedmesh-bootstrap.service >/dev/null <<EOF
+[Unit]
+Description=Seedmesh bootstrap peer
+After=network-online.target
+
+[Service]
+User=seedmesh
+WorkingDirectory=/home/seedmesh/seedmesh
+ExecStart=/home/seedmesh/.venv/bin/seedmesh bootstrap --port 31337 --announce-ip ${PUBLIC_IP}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload && systemctl enable --now seedmesh-bootstrap && sleep 20 && systemctl is-active seedmesh-bootstrap'
+```
+
+Then confirm the peer id still matches what `swarm.json` says:
+
+```bash
+ssh root@YOUR_DROPLET_IP 'journalctl -u seedmesh-bootstrap -n 40 --no-pager | grep -o "12D3[A-Za-z0-9]*\|Qm[A-Za-z0-9]*" | head -2'
+```
+
+**If the key is gone**, the id will differ and you must update `bootstrap_peers` in
+`seedmesh/swarm.json` and redistribute it. There is no way to recover the old id without the
+key — that is the point of the key.
