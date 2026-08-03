@@ -286,6 +286,21 @@ resumed. Send the prompt again.
 **`No GPU detected and --num-blocks not given`** — `probe` found no CUDA device. You can
 still use a swarm as a client.
 
+**`NOT VISIBLE after 180s` from your own server** — `serve` now checks whether the swarm can
+actually see you, because `Started` only means the local process came up. It says nothing
+about whether any record reached the DHT, and those failures look identical from your own
+terminal. If you see this, run `seedmesh monitor` (do you appear in your own swarm view?)
+then `seedmesh doctor`. A server that never announces is usually a DHT write that is not
+landing, not a problem with the blocks. Disable with `--no-visibility-check`.
+
+**`monitor` says blocks are missing but you have spare capacity** — auto-assignment balances
+load; it does not guarantee a specific gap closes. `monitor` names the missing blocks, so
+serve them explicitly:
+
+```bash
+seedmesh serve --model 8b --block-indices 0:9
+```
+
 **Server starts, then nobody can reach it** — run `seedmesh doctor`, which answers this
 directly instead of leaving you to infer it. Otherwise: count your bootstrap peers first. Fewer than
 four and your machine never learns its own public address, so it advertises nothing dialable.

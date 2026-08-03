@@ -920,7 +920,7 @@ def test_block_indices_reaches_the_server(parser, monkeypatch):
     monkeypatch.setattr(main_mod, "_backend_missing", lambda what: False)
     monkeypatch.setattr("subprocess.call", lambda cmd, **kw: captured.update(cmd=cmd) or 0)
 
-    main_mod.main(["serve", "--block-indices", "0:9"])
+    main_mod.main(["serve", "--no-visibility-check", "--block-indices", "0:9"])
     cmd = captured["cmd"]
     assert "--block_indices" in cmd
     assert cmd[cmd.index("--block_indices") + 1] == "0:9"
@@ -936,7 +936,8 @@ def test_block_indices_removes_num_blocks(parser, monkeypatch):
     monkeypatch.setattr(main_mod, "_backend_missing", lambda what: False)
     monkeypatch.setattr("subprocess.call", lambda cmd, **kw: captured.update(cmd=cmd) or 0)
 
-    main_mod.main(["serve", "--num-blocks", "12", "--block-indices", "0:9"])
+    main_mod.main(["serve", "--no-visibility-check", "--num-blocks", "12",
+                   "--block-indices", "0:9"])
     cmd = captured["cmd"]
     assert "--num_blocks" not in cmd
     assert "12" not in cmd, "the value must go with the flag, not be left orphaned"
@@ -953,7 +954,7 @@ def test_a_malformed_range_is_refused_before_launching(parser, monkeypatch):
         raise AssertionError("should not have launched the server")
 
     monkeypatch.setattr("subprocess.call", must_not_run)
-    assert main_mod.main(["serve", "--block-indices", "9"]) == 2
+    assert main_mod.main(["serve", "--no-visibility-check", "--block-indices", "9"]) == 2
 
 
 def test_drop_num_blocks_leaves_everything_else():

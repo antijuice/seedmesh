@@ -331,6 +331,12 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     print(f"$ {' '.join(command)}\n")
     import subprocess
 
+    # Baseline BEFORE launching: the check identifies "you" as a peer that was not in the
+    # swarm a moment ago, so it must be taken while that is still true.
+    watcher = None
+    if not args.no_visibility_check:
+        watcher = _start_visibility_watch(peers, args.model, _peer_baseline(peers, args.model))
+
     try:
         return subprocess.call(command)
     except KeyboardInterrupt:
@@ -338,6 +344,70 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     except FileNotFoundError:
         print("Could not launch the Petals server. Run `seedmesh setup` first.")
         return 2
+    finally:
+        if watcher is not None:
+            watcher.cancelled = True
+
+
+class _Watcher:
+    """Lets the main thread tell a background watcher to stop reporting."""
+
+    def __init__(self):
+        self.cancelled = False
+
+
+def _peer_baseline(peers, model):
+    """Who is already in the swarm. None if unreadable -- see visibility.py on why that
+    is kept distinct from an empty swarm."""
+    try:
+        from hivemind.dht import DHT
+
+        from seedmesh.cli.visibility import snapshot_peers
+
+        dht = DHT(initial_peers=peers, client_mode=True, start=True)
+        try:
+            return snapshot_peers(dht, model)
+        finally:
+            dht.shutdown()
+    except Exception:
+        return None
+
+
+def _start_visibility_watch(peers, model, baseline):
+    """Report, in the background, whether this server became visible to the swarm.
+
+    A daemon thread on purpose: it must never delay the server's own shutdown, and its
+    answer stops being interesting the moment the volunteer stops the server.
+    """
+    import threading
+
+    watcher = _Watcher()
+
+    def run():
+        # Imports INSIDE the try. With them outside, a missing backend raised
+        # ModuleNotFoundError on the thread, which Python prints as an unhandled thread
+        # exception -- a diagnostic producing a traceback next to a server that is working
+        # fine. Caught by the test suite on a machine with no hivemind.
+        try:
+            from hivemind.dht import DHT
+
+            from seedmesh.cli.visibility import watch
+
+            def emit(text):
+                if not watcher.cancelled:
+                    print(text, flush=True)
+
+            watch(
+                lambda: DHT(initial_peers=peers, client_mode=True, start=True),
+                model,
+                baseline=baseline,
+                emit=emit,
+            )
+        except Exception:
+            pass  # a diagnostic must never take down a working server
+
+    threading.Thread(target=run, daemon=True).start()
+    return watcher
 
 
 # ---- bootstrap --------------------------------------------------------------
@@ -898,6 +968,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--swarm-file", "--swarm_file", default=None,
                       help="JSON swarm definition (default: the packaged one)")
     serve.add_argument("--device", default=None)
+    serve.add_argument("--no-visibility-check", "--no_visibility_check", action="store_true",
+                       help="do not check whether the swarm can see this server")
     serve.add_argument("--block-indices", "--block_indices", default=None,
                        help="serve exactly these blocks, e.g. 0:9 -- use to fill a known gap "
                             "that auto-assignment has not covered")
