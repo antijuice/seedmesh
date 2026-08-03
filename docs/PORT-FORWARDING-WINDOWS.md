@@ -24,14 +24,38 @@ advice you will find in most guides, and it is wrong for this configuration. Con
 inside WSL: `ip -4 -o addr show` should list your real LAN addresses, not a `172.x` private
 one on `eth0`.
 
-If it is *not* mirrored, add it (Windows 11 with WSL ≥ 2.0):
+If it is *not* mirrored, this one command sets it and restarts WSL. Paste into **PowerShell
+on Windows** — not into a WSL shell (Windows 11, WSL ≥ 2.0):
 
 ```powershell
-Add-Content "$env:USERPROFILE\.wslconfig" "`n[wsl2]`nnetworkingMode=mirrored"
-wsl --shutdown
+$p="$env:USERPROFILE\.wslconfig"; $c=if(Test-Path $p){Get-Content $p -Raw}else{''}; if($c -match '(?m)^\s*networkingMode\s*='){$c=$c -replace '(?m)^\s*networkingMode\s*=.*','networkingMode=mirrored'} elseif($c -match '(?m)^\s*\[wsl2\]'){$c=$c -replace '(?m)^(\s*\[wsl2\][^\r\n]*)',"`$1`r`nnetworkingMode=mirrored"} else{$c=($c.TrimEnd()+"`r`n[wsl2]`r`nnetworkingMode=mirrored").TrimStart()}; Set-Content $p $c.TrimEnd() -Encoding utf8; Get-Content $p; wsl --shutdown
 ```
 
-## Step 1 — the Hyper-V firewall (the one that silently drops everything)
+It **edits rather than appends**, which matters. The obvious version —
+`Add-Content "$env:USERPROFILE\.wslconfig" "[wsl2]\nnetworkingMode=mirrored"` — is wrong on
+two common starting states: it creates a **duplicate `[wsl2]` section** on a machine that
+already has one, and it leaves a stale `networkingMode=nat` sitting above the line it adds.
+Verified against four starting states (no file, an existing `[wsl2]` with other keys, an
+existing `networkingMode=nat`, and running it twice). It prints the resulting file so you can
+see what it did.
+
+Then confirm from inside WSL — you want your real LAN addresses, not a `172.x` on `eth0`:
+
+```bash
+ip -4 -o addr show
+```
+
+## Step 1 — the Hyper-V firewall (maybe; see the correction below)
+
+**CORRECTION 2026-08-03.** This section previously called the Hyper-V firewall "the one that
+silently drops everything", inferred from `DefaultInboundAction = Block` on a machine that
+was not reachable. Later evidence contradicts it: on that *same* machine, with the setting
+still `Block`, a Colab client reached the server **directly** and moved 402 KB per request.
+So `Block` did not prevent inbound there, and the claim was wrong.
+
+Treat the rule below as something to try only if you are still unreachable after mirrored
+networking is on and `seedmesh doctor` disagrees with reality. Do not run it pre-emptively —
+it is an elevated firewall change made on a guess.
 
 Mirrored mode routes inbound traffic through a **separate firewall from the normal Windows
 one**, and it defaults to blocking. A correct router forward plus a correct Windows Firewall
