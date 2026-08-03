@@ -306,6 +306,24 @@ def cmd_gateway(args) -> int:
     # DHT before the model, as everywhere else -- hivemind allocates a shared-memory buffer
     # on first construction and it fails inside transformers' init context.
     dht = DHT(initial_peers=peers, client_mode=True, start=True)
+
+    # Same order as chat: coverage first, download second. The gateway made this worse than
+    # chat did, because a browser tab pointed at a URL that never comes up gives even less
+    # to go on than a silent terminal.
+    from seedmesh.cli.preflight import check_before_loading, describe_download
+
+    ok, lines = check_before_loading(
+        dht, args.model, skip=getattr(args, "skip_coverage_check", False)
+    )
+    for line in lines:
+        print(line)
+    if not ok:
+        dht.shutdown()
+        return 1
+
+    for line in describe_download(args.model):
+        print(line)
+
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoDistributedModelForCausalLM.from_pretrained(
         args.model, initial_peers=peers, torch_dtype=torch.float32,

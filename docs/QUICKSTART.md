@@ -260,6 +260,18 @@ swarm: a NAT'd laptop showed `ONLINE` with all 12 blocks and was unreachable at 
 then served the identical query ~5 minutes later with nothing changed. Wait and retry. If it
 persists past ~10 minutes, see [NAT-AND-RELAYS.md](NAT-AND-RELAYS.md).
 
+**`chat` or `gateway` exits with a coverage report instead of starting** — working as
+intended. Both check whether the swarm can serve the model *before* downloading the client's
+share of it (~2 GiB for an 8B model), because downloading two gigabytes and then waiting out
+a five-minute routing warm-up is an expensive way to discover that nine blocks have no host.
+Start the missing servers, or pass `--skip-coverage-check` if you know one is seconds away.
+
+**`chat` or `gateway` seems to hang after printing two lines** — it is downloading. A client
+fetches the embedding matrix and lm_head before it can do anything: ~2 GiB for an 8B model,
+~94 MiB for llama-160m. Both commands now say so before they start, including that block
+weights are *not* downloaded to a client. If you killed it earlier, the partial download is
+cached and resumes.
+
 **A prompt takes an extra second and prints `(attempt 1 stalled, retrying)`** — working as
 intended. `chat` uses a short 10s per-attempt timeout and retries with a *fresh* session,
 because a stalled request never recovers on its own; a long timeout only delays the retry

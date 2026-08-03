@@ -652,6 +652,21 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     # construction, and doing that inside transformers' init context fails. See
     # docs/petals-port.md.
     dht = DHT(initial_peers=peers, client_mode=True, start=True)
+
+    # Ask whether the swarm can serve this model BEFORE fetching two gigabytes of
+    # embeddings. The DHT answers in seconds and the answer does not depend on the weights.
+    from seedmesh.cli.preflight import check_before_loading, describe_download
+
+    ok, lines = check_before_loading(dht, args.model, skip=args.skip_coverage_check)
+    for line in lines:
+        print(line)
+    if not ok:
+        dht.shutdown()
+        return 1
+
+    for line in describe_download(args.model):
+        print(line)
+
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     # max_retries is bounded on purpose -- Petals defaults to retrying forever, which in a
     # small swarm means hanging instead of reporting. request_timeout is NOT tightened:
@@ -935,6 +950,9 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--swarm-file", "--swarm_file", default=None,
                       help="JSON swarm definition (default: the packaged one)")
     chat.add_argument("--max-new-tokens", "--max_new_tokens", type=int, default=32)
+    chat.add_argument("--skip-coverage-check", "--skip_coverage_check",
+                      action="store_true",
+                      help="load the model even if the swarm does not currently cover it")
     chat.add_argument("--timeout", type=float, default=CHAT_REQUEST_TIMEOUT,
                       help="per-attempt timeout in seconds")
     chat.add_argument("--attempts", type=int, default=CHAT_ATTEMPTS,
@@ -959,6 +977,9 @@ def build_parser() -> argparse.ArgumentParser:
                               "printed token")
     gateway.add_argument("--port", type=int, default=8080)
     gateway.add_argument("--max-new-tokens", "--max_new_tokens", type=int, default=64)
+    gateway.add_argument("--skip-coverage-check", "--skip_coverage_check",
+                      action="store_true",
+                      help="load the model even if the swarm does not currently cover it")
     gateway.add_argument("--timeout", type=float, default=CHAT_REQUEST_TIMEOUT)
     gateway.add_argument("--attempts", type=int, default=CHAT_ATTEMPTS)
     gateway.add_argument("--no-reputation", "--no_reputation", action="store_true")
