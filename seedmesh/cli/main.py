@@ -294,6 +294,17 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     # while the server allocates the default would OOM by exactly the amount we planned around.
     if args.attn_cache_tokens:
         command += ["--attn_cache_tokens", str(args.attn_cache_tokens)]
+    if args.block_indices:
+        # Auto-assignment balances load; it does not guarantee a specific gap gets filled,
+        # and with two volunteers a gap is the difference between a usable model and none.
+        # `seedmesh monitor` names the missing blocks, so this is how you act on that.
+        if ":" not in args.block_indices:
+            print(f"--block-indices must be start:end (e.g. 0:9), got {args.block_indices!r}")
+            return 2
+        # Petals rejects both together: block_indices already fixes the count.
+        command = _drop_num_blocks(command)
+        command += ["--block_indices", args.block_indices]
+
     if args.public_ip:
         # Petals decides relay-vs-direct with a reachability check at startup, before the
         # NAT mapping has been observed by anyone -- so on an endpoint-independent NAT it
@@ -330,6 +341,20 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
 
 # ---- bootstrap --------------------------------------------------------------
+
+
+def _drop_num_blocks(command: list) -> list:
+    """Remove `--num_blocks N`. Petals asserts if it is given alongside `--block_indices`."""
+    out, skip = [], False
+    for part in command:
+        if skip:
+            skip = False
+            continue
+        if part == "--num_blocks":
+            skip = True
+            continue
+        out.append(part)
+    return out
 
 
 def _serve_port(args) -> Optional[int]:
@@ -873,6 +898,9 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--swarm-file", "--swarm_file", default=None,
                       help="JSON swarm definition (default: the packaged one)")
     serve.add_argument("--device", default=None)
+    serve.add_argument("--block-indices", "--block_indices", default=None,
+                       help="serve exactly these blocks, e.g. 0:9 -- use to fill a known gap "
+                            "that auto-assignment has not covered")
     serve.add_argument("--public-ip", "--public_ip", default=None,
                        help="advertise this public address instead of falling back to relays; "
                             "use the address `seedmesh doctor` reports")

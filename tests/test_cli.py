@@ -903,3 +903,62 @@ def test_headers_are_detected_on_this_machine():
     from seedmesh.cli.setup import has_python_headers
 
     assert has_python_headers() in (True, False)
+
+
+# ---- --block-indices: filling a gap auto-assignment left ---------------------
+#
+# Two volunteers on a 32-block model ended up with one serving 9-32 and blocks 0-8 hosted by
+# nobody, which makes the model unusable however much capacity is donated. `monitor` names
+# the missing blocks; this is how a volunteer acts on that.
+
+
+def test_block_indices_reaches_the_server(parser, monkeypatch):
+    import seedmesh.cli.main as main_mod
+
+    captured = {}
+    monkeypatch.setattr(main_mod, "_refuse_on_windows", lambda what: False)
+    monkeypatch.setattr(main_mod, "_backend_missing", lambda what: False)
+    monkeypatch.setattr("subprocess.call", lambda cmd, **kw: captured.update(cmd=cmd) or 0)
+
+    main_mod.main(["serve", "--block-indices", "0:9"])
+    cmd = captured["cmd"]
+    assert "--block_indices" in cmd
+    assert cmd[cmd.index("--block_indices") + 1] == "0:9"
+
+
+def test_block_indices_removes_num_blocks(parser, monkeypatch):
+    """Petals asserts if both are given -- block_indices already fixes the count. Passing
+    both is the natural thing to do after reading auto-sizing output, so it must not fail."""
+    import seedmesh.cli.main as main_mod
+
+    captured = {}
+    monkeypatch.setattr(main_mod, "_refuse_on_windows", lambda what: False)
+    monkeypatch.setattr(main_mod, "_backend_missing", lambda what: False)
+    monkeypatch.setattr("subprocess.call", lambda cmd, **kw: captured.update(cmd=cmd) or 0)
+
+    main_mod.main(["serve", "--num-blocks", "12", "--block-indices", "0:9"])
+    cmd = captured["cmd"]
+    assert "--num_blocks" not in cmd
+    assert "12" not in cmd, "the value must go with the flag, not be left orphaned"
+    assert cmd[cmd.index("--block_indices") + 1] == "0:9"
+
+
+def test_a_malformed_range_is_refused_before_launching(parser, monkeypatch):
+    import seedmesh.cli.main as main_mod
+
+    monkeypatch.setattr(main_mod, "_refuse_on_windows", lambda what: False)
+    monkeypatch.setattr(main_mod, "_backend_missing", lambda what: False)
+
+    def must_not_run(cmd, **kw):
+        raise AssertionError("should not have launched the server")
+
+    monkeypatch.setattr("subprocess.call", must_not_run)
+    assert main_mod.main(["serve", "--block-indices", "9"]) == 2
+
+
+def test_drop_num_blocks_leaves_everything_else():
+    from seedmesh.cli.main import _drop_num_blocks
+
+    assert _drop_num_blocks(
+        ["python", "-m", "x", "--num_blocks", "12", "--quant_type", "nf4"]
+    ) == ["python", "-m", "x", "--quant_type", "nf4"]
