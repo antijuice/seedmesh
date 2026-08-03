@@ -21,7 +21,8 @@ def test_all_commands_are_registered(parser):
     actions = [a for a in parser._actions if a.dest == "command"]
     assert actions, "no subcommand group"
     assert set(actions[0].choices) == {
-        "setup", "probe", "serve", "bootstrap", "doctor", "chat", "monitor", "simulate",
+        "setup", "probe", "serve", "bootstrap", "doctor", "chat", "monitor", "gateway",
+        "simulate",
     }
 
 

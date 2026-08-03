@@ -1,6 +1,6 @@
 """``seedmesh`` command line.
 
-Seven commands, aimed at the things a volunteer actually does -- find out what they can
+Eight commands, aimed at the things a volunteer actually does -- find out what they can
 contribute, contribute it, and see that it worked:
 
     seedmesh setup      install and patch the Petals backend
@@ -10,6 +10,7 @@ contribute, contribute it, and see that it worked:
     seedmesh doctor     can this machine host, and if not why
     seedmesh chat       talk to a swarm
     seedmesh monitor    who is donating what, and is the model covered
+    seedmesh gateway    a local web UI over the swarm
 
 `simulate` remains for developing the trust layer against adversarial scenarios without any
 backend at all.
@@ -948,6 +949,24 @@ def build_parser() -> argparse.ArgumentParser:
                       default=DEFAULT_SYNC_INTERVAL_S,
                       help="seconds between reputation publish/fetch rounds")
 
+    gateway = subparsers.add_parser("gateway", help="a local web UI over the swarm")
+    gateway.add_argument("--model", default=None,
+                         help="default: whatever the swarm file names")
+    gateway.add_argument("--initial-peers", "--initial_peers", nargs="+", default=None)
+    gateway.add_argument("--swarm-file", "--swarm_file", default=None)
+    gateway.add_argument("--host", default="127.0.0.1",
+                         help="local-only by default; there is no authentication beyond the "
+                              "printed token")
+    gateway.add_argument("--port", type=int, default=8080)
+    gateway.add_argument("--max-new-tokens", "--max_new_tokens", type=int, default=64)
+    gateway.add_argument("--timeout", type=float, default=CHAT_REQUEST_TIMEOUT)
+    gateway.add_argument("--attempts", type=int, default=CHAT_ATTEMPTS)
+    gateway.add_argument("--no-reputation", "--no_reputation", action="store_true")
+    gateway.add_argument("--no-verify", "--no_verify", action="store_true")
+    gateway.add_argument("--no-routing-gate", "--no_routing_gate", action="store_true")
+    gateway.add_argument("--gossip-interval", "--gossip_interval", type=float,
+                         default=DEFAULT_SYNC_INTERVAL_S)
+
     simulate = subparsers.add_parser(
         "simulate", help="run trust-layer scenarios against the swarm simulator"
     )
@@ -1004,6 +1023,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         from seedmesh.cli.monitor import cmd_monitor
 
         return cmd_monitor(args)
+
+    if args.command == "gateway":
+        from seedmesh.cli.gateway import cmd_gateway
+
+        return cmd_gateway(args)
 
     return {
         "probe": _cmd_probe,
