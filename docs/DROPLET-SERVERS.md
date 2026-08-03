@@ -136,9 +136,24 @@ If `seedmesh chat` still reports `skipped: no independent verifier`, and `seedme
 shows `+relay` next to the droplet servers, they were started without the port and announce
 address above. Run this on each, substituting that droplet's own public IP:
 
+**Look before patching.** A `sed` that matches part of the existing line does nothing when
+that part differs, and silently — the service restarts, reports `active`, and is unchanged.
+Print the current state first:
+
 ```bash
-ssh root@DROPLET_IP 'ufw allow 31338/tcp && sed -i "s|--attn-cache-tokens 2048|--attn-cache-tokens 2048 --host-maddrs /ip4/0.0.0.0/tcp/31338 --public-ip DROPLET_IP|" /etc/systemd/system/seedmesh-server.service && systemctl daemon-reload && systemctl restart seedmesh-server && sleep 25 && systemctl is-active seedmesh-server'
+ssh root@DROPLET_IP 'grep ^ExecStart /etc/systemd/system/seedmesh-server.service; ufw status | head -5; ss -ltnp | grep -c 31338'
 ```
+
+Then replace the **whole** `ExecStart` line rather than a fragment of it, substituting the
+droplet's own IP in both places:
+
+```bash
+ssh root@DROPLET_IP 'ufw allow 31338/tcp; sed -i "s|^ExecStart=.*|ExecStart=/home/seedmesh/.venv/bin/seedmesh serve --num-blocks 12 --quant none --device cpu --attn-cache-tokens 2048 --host-maddrs /ip4/0.0.0.0/tcp/31338 --public-ip DROPLET_IP --public-name droplet-N|" /etc/systemd/system/seedmesh-server.service && systemctl daemon-reload && systemctl restart seedmesh-server && sleep 30 && ss -ltn | grep 31338 || echo "NOT LISTENING on 31338"'
+```
+
+If `ufw status` says `inactive`, the host firewall is not what is blocking you — check the
+provider's own firewall (DigitalOcean cloud firewalls are configured in the control panel,
+not on the box, and `ufw allow` has no effect on them).
 
 Two servers cannot share port 31338 on one host, so if you ever run a second block server on
 the same droplet give it a different port and open that one too.
