@@ -213,6 +213,27 @@ Only `llama`, `mixtral`, `falcon` and `bloom` exist; see *Choosing a model* abov
 the raw form of this, `ValueError: Petals does not support model type X` from inside a
 traceback, you are on an older checkout that pre-dates the up-front check.
 
+**`RuntimeError: Failed to find C compiler`** — from ~60 frames deep, inside throughput
+measurement, on the first `seedmesh serve`. torch routes some operations through Triton on a
+GPU machine, and Triton *compiles CUDA kernels at runtime*, which needs a C toolchain:
+
+```bash
+sudo apt install -y build-essential
+```
+
+`seedmesh setup` now checks for this up front on GPU machines, so a fresh install reports it
+before doing any work. This is only needed where there is a GPU — a bootstrap peer runs no
+kernels and needs no toolchain.
+
+**`ModuleNotFoundError: No module named 'cpufeature'`** — from inside `seedmesh chat`, before
+it reaches the swarm. Petals imports `cpufeature` in `lm_head.py` guarded on
+`platform.machine()` rather than on the package being present, so on any x86_64 machine
+without it the client dies. The package has no wheels for recent Pythons and building it
+needs the same C compiler. The codemod now makes that import optional — re-run
+`seedmesh setup` (it is idempotent) and the client reads the AVX512 flag from
+`/proc/cpuinfo` instead. Nothing about correctness depends on it; it selects a performance
+path in the lm_head.
+
 **`could not reach huggingface.co`** — usually transient. Hugging Face resets anonymous
 connections under load; `probe` and `serve` already retry three times, so a persistent
 failure is more likely a real network problem than a bad model name.

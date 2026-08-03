@@ -95,7 +95,18 @@ Two runtime dependencies also need installing that `--no-deps` skips: `dijkstar`
 `humanfriendly`, `async-timeout`, `sentencepiece`, `peft`, `speedtest-cli`, `requests`,
 `bitsandbytes`, and `cpufeature`. The last one is worth flagging: `lm_head.py` guards its
 import with `platform.machine() == "x86_64"` — a check on the *machine*, not on whether the
-package is present — so on x86_64 it is mandatory, not optional.
+package is present — so on x86_64 it was mandatory, not optional.
+
+**Since 2026-08-03 it is patched out instead of installed.** `cpufeature` has no wheels for
+recent Pythons and building it needs a C compiler, which is exactly what a fresh volunteer
+machine lacks — so "install it" turns one missing dependency into two. It decides a single
+performance path (AVX512 present → plain bf16 beats chunked_forward by ~10x; absent → the
+reverse), and never correctness. The codemod wraps the import and falls back to reading
+`avx512f` from `/proc/cpuinfo`, verified to flip the decision in both directions.
+
+A note on how this was missed: `setup.py`'s own comment named `cpufeature` as mandatory while
+`RUNTIME_DEPS` omitted it. The developer machine had it from an earlier hand-built venv, so
+every install here succeeded and the first genuinely fresh machine failed.
 
 ## What the verifier proves
 

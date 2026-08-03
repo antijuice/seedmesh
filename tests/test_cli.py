@@ -816,3 +816,43 @@ def test_public_ip_is_accepted_with_its_underscore_spelling(parser):
     a = parser.parse_args(["serve", "--public_ip", "66.31.117.31"])
     b = parser.parse_args(["serve", "--public-ip", "66.31.117.31"])
     assert a.public_ip == b.public_ip == "66.31.117.31"
+
+
+# ---- preflight: the two things that broke a new volunteer's first run --------
+#
+# Both failed deep inside a traceback with no hint that setup could have caught them:
+#   * missing C compiler -> Triton cannot build CUDA kernels -> dies on the first forward
+#   * missing cpufeature -> `seedmesh chat` dies inside LMHead before reaching the swarm
+# The second is fixed in the codemod; the first is an apt package, so it is a preflight.
+
+
+def test_a_gpu_without_a_c_compiler_is_reported_before_any_work(monkeypatch):
+    from seedmesh.cli import setup as setup_module
+
+    monkeypatch.setattr(setup_module, "has_nvidia_gpu", lambda: True)
+    monkeypatch.setattr(setup_module, "has_c_compiler", lambda: False)
+    monkeypatch.setattr(setup_module.platform, "system", lambda: "Linux")
+
+    problems = setup_module.check_platform()
+    assert any("C compiler" in p for p in problems)
+    # A diagnosis without the remedy just relocates the confusion.
+    assert any("build-essential" in p for p in problems)
+
+
+def test_no_gpu_means_no_compiler_requirement(monkeypatch):
+    from seedmesh.cli import setup as setup_module
+
+    # A bootstrap peer hosts no blocks and never runs a kernel; demanding a toolchain
+    # would turn a working $5 VPS into a failed install.
+    monkeypatch.setattr(setup_module, "has_nvidia_gpu", lambda: False)
+    monkeypatch.setattr(setup_module, "has_c_compiler", lambda: False)
+    monkeypatch.setattr(setup_module.platform, "system", lambda: "Linux")
+
+    assert setup_module.check_platform() == []
+
+
+def test_cc_env_var_counts_as_a_compiler(monkeypatch):
+    from seedmesh.cli import setup as setup_module
+
+    monkeypatch.setenv("CC", "python")  # something guaranteed to be on PATH
+    assert setup_module.has_c_compiler() is True

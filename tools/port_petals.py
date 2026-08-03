@@ -576,6 +576,64 @@ def apply_generation_fix(root: Path, write: bool) -> str:
     return f"OK    generation patched for transformers 5.x ({', '.join(changes)})"
 
 
+LM_HEAD_ORIGINAL = """            if platform.machine() == "x86_64":
+                # Import of cpufeature may crash on non-x86_64 machines
+                from cpufeature import CPUFeature
+
+                # If the CPU supports AVX512, plain bfloat16 is ~10x faster than chunked_forward().
+                # Otherwise, it's ~8x slower.
+                self.use_chunked_forward = not (CPUFeature["AVX512f"] and CPUFeature["OS_AVX512"])
+            else:
+                self.use_chunked_forward = True"""
+
+LM_HEAD_PATCHED = """            # PORT: cpufeature made optional. It is a hard import here, guarded on
+            # platform.machine() rather than on the package being present, so on any x86_64
+            # machine without it `seedmesh chat` dies with ModuleNotFoundError before
+            # reaching the swarm. It has no wheels for recent Pythons and building it needs
+            # a C compiler -- which is exactly what a fresh volunteer machine lacks.
+            #
+            # It decides ONE performance path: whether to chunk the lm_head matmul. With
+            # AVX512, plain bfloat16 is ~10x faster than chunked_forward(); without it,
+            # ~8x slower. Nothing about correctness depends on it, and the path is only
+            # reached at all when lm_head weights are fp16/bf16 on CPU.
+            self.use_chunked_forward = True
+            if platform.machine() == "x86_64":
+                try:
+                    from cpufeature import CPUFeature
+
+                    self.use_chunked_forward = not (
+                        CPUFeature["AVX512f"] and CPUFeature["OS_AVX512"]
+                    )
+                except Exception:
+                    # Read the flag straight from the kernel instead. Same answer on Linux,
+                    # no dependency; anywhere else this falls through to the conservative
+                    # chunked path, which is slower but never wrong.
+                    try:
+                        with open("/proc/cpuinfo", encoding="utf-8") as handle:
+                            self.use_chunked_forward = "avx512f" not in handle.read()
+                    except OSError:
+                        pass"""
+
+
+def apply_cpufeature_fix(root: Path, write: bool) -> str:
+    """Stop a missing `cpufeature` from being a fatal client-side import.
+
+    Reported by a new volunteer on Python 3.14: `seedmesh chat` died with
+    ModuleNotFoundError inside LMHead.__init__ before it ever reached the swarm.
+    """
+    target = root / "src" / "petals" / "client" / "lm_head.py"
+    if not target.exists():
+        return f"SKIP  {target} not found"
+    source = target.read_text(encoding="utf-8")
+    if "cpufeature made optional" in source:
+        return "OK    cpufeature already optional"
+    if LM_HEAD_ORIGINAL not in source:
+        return "WARN  lm_head cpufeature block does not match upstream text; patch by hand"
+    if write:
+        target.write_text(source.replace(LM_HEAD_ORIGINAL, LM_HEAD_PATCHED), encoding="utf-8")
+    return "OK    cpufeature import made optional (AVX512 read from /proc/cpuinfo)"
+
+
 def apply_version_guard(root: Path, write: bool) -> str:
     target = root / "src" / "petals" / "__init__.py"
     if not target.exists():
@@ -669,6 +727,7 @@ def main() -> int:
     print(apply_attn_publication(root, write))
     print(apply_generation_fix(root, write))
     print(apply_version_guard(root, write))
+    print(apply_cpufeature_fix(root, write))
 
     if unmapped:
         # Loud, and a non-zero exit. Silence here once produced a "successful" port whose

@@ -61,6 +61,21 @@ def run(command: list[str], *, check: bool = True) -> subprocess.CompletedProces
     return result
 
 
+def has_c_compiler() -> bool:
+    """Whether Triton will be able to build its CUDA kernels.
+
+    Checks `CC` first because Triton does; then the usual names. `cc` alone is not enough on
+    every distro, so any of them counts.
+    """
+    import os
+    import shutil
+
+    explicit = os.environ.get("CC")
+    if explicit and shutil.which(explicit):
+        return True
+    return any(shutil.which(name) for name in ("cc", "gcc", "clang"))
+
+
 def check_platform() -> list[str]:
     """Report anything that will stop this working, before doing any work."""
     problems = []
@@ -72,6 +87,21 @@ def check_platform() -> list[str]:
         )
     if sys.version_info < (3, 9):
         problems.append(f"Python {sys.version_info.major}.{sys.version_info.minor} is too old; need >= 3.9")
+
+    # A GPU means torch will route some ops through Triton, which JIT-COMPILES CUDA kernels
+    # at runtime and shells out to a C compiler to do it. Without one, the failure arrives
+    # ~60 frames deep on the first forward pass, inside throughput measurement, reading
+    # "Failed to find C compiler" with no hint that it is a missing apt package. Reported by
+    # a volunteer whose machine was otherwise correctly set up.
+    if has_nvidia_gpu() and not has_c_compiler():
+        problems.append(
+            "no C compiler found, and this machine has an NVIDIA GPU.\n"
+            "      torch compiles Triton kernels at runtime and needs one, so serving would\n"
+            "      fail on its first forward pass. Install one:\n"
+            "        sudo apt install -y build-essential            # Debian/Ubuntu\n"
+            "        sudo dnf groupinstall -y 'Development Tools'   # Fedora/RHEL\n"
+            "      (or set CC=/path/to/compiler if you have one elsewhere)"
+        )
     return problems
 
 
