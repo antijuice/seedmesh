@@ -309,3 +309,44 @@ def test_states_map_to_the_names_coverage_counting_uses():
     assert count_replicas(rows, 1) == [0]
     rows = collapse_spans([{"p": announcement_from_tuple((2, 1.0, {}))}])  # ONLINE
     assert count_replicas(rows, 1) == [1]
+
+# ---- a report must not contradict itself ------------------------------------
+#
+# Bringing up the 8B model produced "1 server(s) donating 23 block-slot(s)" immediately above
+# "NOT USABLE: 32 block(s) have no host". Both were true -- coverage counts only ONLINE peers
+# and the single server was still JOINING -- but read together they say the tool is broken.
+# Nothing was broken; the server was loading 15 GiB of weights.
+
+
+def has(lines, phrase):
+    return any(phrase in line for line in lines)
+
+
+def test_a_joining_only_swarm_says_so_instead_of_looking_broken():
+    per_block = blocks(32, ("peer-a", 0, 23, {"state": "JOINING"}))
+    lines = render_text(build_report("m", 32, per_block))
+    assert has(lines, "still JOINING")
+    assert has(lines, "Nothing is wrong")
+    # The generic line is advice for a different situation and must not appear here.
+    assert not has(lines, "same blocks does not help")
+
+
+def test_it_still_warns_when_the_joining_servers_will_not_be_enough():
+    # 23 of 32 blocks: even once loaded the model stays unusable. Saying "just wait"
+    # without saying that would be false reassurance.
+    per_block = blocks(32, ("peer-a", 0, 23, {"state": "JOINING"}))
+    assert has(render_text(build_report("m", 32, per_block)), "short of 32")
+
+
+def test_no_false_alarm_when_the_joining_servers_do_cover_it():
+    per_block = blocks(12, ("peer-a", 0, 12, {"state": "JOINING"}))
+    lines = render_text(build_report("m", 12, per_block))
+    assert has(lines, "still JOINING")
+    assert not has(lines, "short of")
+
+
+def test_a_genuinely_uncovered_online_swarm_keeps_the_original_advice():
+    per_block = blocks(12, ("peer-a", 0, 6, {"state": "ONLINE"}))
+    lines = render_text(build_report("m", 12, per_block))
+    assert has(lines, "same blocks does not help")
+    assert not has(lines, "still JOINING")

@@ -249,8 +249,30 @@ def render_text(report: SwarmReport) -> List[str]:
         shown = ", ".join(str(b) for b in missing[:12])
         more = f" (+{len(missing) - 12} more)" if len(missing) > 12 else ""
         lines.append(f"            NOT USABLE: {len(missing)} block(s) have no host: {shown}{more}")
-        lines.append("            A model needs every block covered; more servers on the")
-        lines.append("            same blocks does not help.")
+
+        # Name the reason when servers exist but none of them counts yet. Without this the
+        # report contradicts itself -- "1 server donating 23 block-slots" directly above
+        # "32 blocks have no host" -- and the natural reading is that the tool is broken
+        # rather than that the server is still loading. Hit for real while bringing up 8B.
+        joining = [row for row in report.servers if row.state == "JOINING"]
+        if joining and not any(row.state == "ONLINE" for row in report.servers):
+            covered_when_ready = sum(row.end - row.start for row in joining)
+            lines.append(
+                f"            {len(joining)} server(s) are still JOINING -- loading blocks, "
+                "not serving yet."
+            )
+            lines.append(
+                f"            Nothing is wrong; wait for them. They will cover "
+                f"{covered_when_ready} block-slot(s)."
+            )
+            if covered_when_ready < report.n_blocks:
+                lines.append(
+                    f"            That is still short of {report.n_blocks}; "
+                    "you need more volunteers."
+                )
+        else:
+            lines.append("            A model needs every block covered; more servers on the")
+            lines.append("            same blocks does not help.")
     lines.append("")
 
     lines.append("  server                blocks  profile                self-rep.  observed")
