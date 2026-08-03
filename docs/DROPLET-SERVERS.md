@@ -147,9 +147,22 @@ ssh root@DROPLET_IP 'grep ^ExecStart /etc/systemd/system/seedmesh-server.service
 Then replace the **whole** `ExecStart` line rather than a fragment of it, substituting the
 droplet's own IP in both places:
 
+**Let the droplet supply its own IP.** An earlier version of this command had the address in
+two places for you to substitute, and one droplet ended up announcing the *other* one's
+address — which fails in a genuinely confusing way: the port is open, TCP connects, and
+libp2p still refuses with `all dials failed ... dial backoff`, because the peer id answering
+there is not the one the record claims. `curl` removes the possibility:
+
 ```bash
-ssh root@DROPLET_IP 'ufw allow 31338/tcp; sed -i "s|^ExecStart=.*|ExecStart=/home/seedmesh/.venv/bin/seedmesh serve --num-blocks 12 --quant none --device cpu --attn-cache-tokens 2048 --host-maddrs /ip4/0.0.0.0/tcp/31338 --public-ip DROPLET_IP --public-name droplet-N|" /etc/systemd/system/seedmesh-server.service && systemctl daemon-reload && systemctl restart seedmesh-server && sleep 30 && ss -ltn | grep 31338 || echo "NOT LISTENING on 31338"'
+ssh root@DROPLET_IP 'IP=$(curl -4 -s ifconfig.me); ufw allow 31338/tcp; sed -i "s|^ExecStart=.*|ExecStart=/home/seedmesh/.venv/bin/seedmesh serve --num-blocks 12 --quant none --device cpu --attn-cache-tokens 2048 --host-maddrs /ip4/0.0.0.0/tcp/31338 --public-ip ${IP} --public-name $(hostname)|" /etc/systemd/system/seedmesh-server.service && systemctl daemon-reload && systemctl restart seedmesh-server && sleep 30 && grep ^ExecStart /etc/systemd/system/seedmesh-server.service'
 ```
+
+It prints the resulting `ExecStart`, so you can see the address it chose rather than trusting
+that a substitution landed.
+
+**Restart order matters.** Petals decides relay-vs-direct with a reachability check at
+*startup*. Opening the firewall after the server is already running changes nothing until it
+restarts, so `ufw allow` and `systemctl restart` belong in that order, in one command.
 
 If `ufw status` says `inactive`, the host firewall is not what is blocking you — check the
 provider's own firewall (DigitalOcean cloud firewalls are configured in the control panel,
