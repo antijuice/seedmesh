@@ -57,7 +57,19 @@ On **two** of the four droplets. As root first:
 su - seedmesh -c 'cd ~/seedmesh && git pull -q && ~/.venv/bin/pip install -qe .'
 ```
 
-Then a service, so it survives a reboot and logs somewhere findable:
+**Open a port for the block server first.** This is the whole reason for hosting on a
+droplet, and leaving it out silently defeats the exercise: without a fixed, reachable port
+Petals' startup reachability check fails, the server falls back to relays, and it then
+advertises a *circuit* address whose IP belongs to the relay. A client cannot place such a
+peer on a network, so it is refused as a verification partner — which is exactly the thing
+these servers exist to provide.
+
+```bash
+ufw allow 31338/tcp
+```
+
+Then a service, so it survives a reboot and logs somewhere findable. Note the three flags
+that make it directly dialable — a pinned port, and its own public address to announce:
 
 ```bash
 tee /etc/systemd/system/seedmesh-server.service >/dev/null <<'EOF'
@@ -68,7 +80,7 @@ After=network-online.target seedmesh-bootstrap.service
 [Service]
 User=seedmesh
 WorkingDirectory=/home/seedmesh/seedmesh
-ExecStart=/home/seedmesh/.venv/bin/seedmesh serve --num-blocks 12 --quant none --device cpu --attn-cache-tokens 2048 --public-name droplet-1
+ExecStart=/home/seedmesh/.venv/bin/seedmesh serve --num-blocks 12 --quant none --device cpu --attn-cache-tokens 2048 --host-maddrs /ip4/0.0.0.0/tcp/31338 --public-ip PUBLIC_IP_HERE --public-name droplet-1
 Restart=on-failure
 RestartSec=30
 # Keep the server from taking the bootstrap peer down with it.
@@ -117,3 +129,22 @@ seedmesh-bootstrap` and restart it; the swarm needs all four.
 **Monitor shows them but `chat` still skips verification** — check the two servers' block
 ranges actually overlap. `seedmesh monitor` prints the range per server; a verifier must
 cover the subject's whole span.
+
+## Fixing droplet servers that came up relay-only
+
+If `seedmesh chat` still reports `skipped: no independent verifier`, and `seedmesh monitor`
+shows `+relay` next to the droplet servers, they were started without the port and announce
+address above. Run this on each, substituting that droplet's own public IP:
+
+```bash
+ssh root@DROPLET_IP 'ufw allow 31338/tcp && sed -i "s|--attn-cache-tokens 2048|--attn-cache-tokens 2048 --host-maddrs /ip4/0.0.0.0/tcp/31338 --public-ip DROPLET_IP|" /etc/systemd/system/seedmesh-server.service && systemctl daemon-reload && systemctl restart seedmesh-server && sleep 25 && systemctl is-active seedmesh-server'
+```
+
+Two servers cannot share port 31338 on one host, so if you ever run a second block server on
+the same droplet give it a different port and open that one too.
+
+Confirm it worked — the `+relay` marker should be gone:
+
+```bash
+seedmesh monitor
+```
