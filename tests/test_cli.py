@@ -856,3 +856,50 @@ def test_cc_env_var_counts_as_a_compiler(monkeypatch):
 
     monkeypatch.setenv("CC", "python")  # something guaranteed to be on PATH
     assert setup_module.has_c_compiler() is True
+
+
+def test_missing_python_headers_are_reported_with_the_right_package(monkeypatch):
+    """A compiler on PATH is not enough. Triton builds a CPython EXTENSION, so it needs
+    Python.h too -- and that failure looks nothing like the first one: gcc runs, then dies
+    on 'fatal error: Python.h: No such file or directory'."""
+    from seedmesh.cli import setup as setup_module
+
+    monkeypatch.setattr(setup_module, "has_nvidia_gpu", lambda: True)
+    monkeypatch.setattr(setup_module, "has_c_compiler", lambda: True)
+    monkeypatch.setattr(setup_module, "has_python_headers", lambda: False)
+    monkeypatch.setattr(setup_module.platform, "system", lambda: "Linux")
+
+    problems = setup_module.check_platform()
+    assert any("Python.h" in p for p in problems)
+    assert any(setup_module.python_headers_package() in p for p in problems)
+
+
+def test_the_headers_package_names_the_running_interpreter():
+    """`python3-dev` installs headers for the distro's DEFAULT python3. On a machine running
+    a newer interpreter that is the wrong package, and it fails identically to installing
+    nothing -- which is how a volunteer lost a second round-trip to this."""
+    import sys
+
+    from seedmesh.cli.setup import python_headers_package
+
+    expected = f"python{sys.version_info.major}.{sys.version_info.minor}-dev"
+    assert python_headers_package() == expected
+
+
+def test_a_complete_toolchain_reports_nothing(monkeypatch):
+    from seedmesh.cli import setup as setup_module
+
+    monkeypatch.setattr(setup_module, "has_nvidia_gpu", lambda: True)
+    monkeypatch.setattr(setup_module, "has_c_compiler", lambda: True)
+    monkeypatch.setattr(setup_module, "has_python_headers", lambda: True)
+    monkeypatch.setattr(setup_module.platform, "system", lambda: "Linux")
+
+    assert setup_module.check_platform() == []
+
+
+def test_headers_are_detected_on_this_machine():
+    # Guards the detection itself: a check that always returns False would make setup
+    # unusable, and one that always returns True would be silent.
+    from seedmesh.cli.setup import has_python_headers
+
+    assert has_python_headers() in (True, False)

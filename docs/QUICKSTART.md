@@ -221,9 +221,21 @@ GPU machine, and Triton *compiles CUDA kernels at runtime*, which needs a C tool
 sudo apt install -y build-essential
 ```
 
-`seedmesh setup` now checks for this up front on GPU machines, so a fresh install reports it
-before doing any work. This is only needed where there is a GPU — a bootstrap peer runs no
-kernels and needs no toolchain.
+**`fatal error: Python.h: No such file or directory`** — the same failure one step further
+on. Triton builds a CPython *extension* to reach CUDA, so a compiler alone is not enough; it
+runs gcc and then cannot find the headers. Install the ones matching **your** interpreter:
+
+```bash
+sudo apt install -y python3.14-dev
+```
+
+The version matters. `python3-dev` installs headers for the distro's default python3, which
+is the wrong package if you run a newer interpreter — and it fails identically to installing
+nothing. `seedmesh setup` prints the correct name for whatever Python you are on.
+
+Both of these are only needed where there is a GPU — a bootstrap peer runs no kernels and
+needs no toolchain. `seedmesh setup` checks for both up front, so a fresh install reports
+them before doing any work.
 
 **`ModuleNotFoundError: No module named 'cpufeature'`** — from inside `seedmesh chat`, before
 it reaches the swarm. Petals imports `cpufeature` in `lm_head.py` guarded on

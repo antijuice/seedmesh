@@ -76,6 +76,31 @@ def has_c_compiler() -> bool:
     return any(shutil.which(name) for name in ("cc", "gcc", "clang"))
 
 
+def has_python_headers() -> bool:
+    """Whether `Python.h` exists for the running interpreter.
+
+    A compiler on PATH is not sufficient: Triton builds a CPython *extension module*, so it
+    needs the development headers too. Checked separately because the second failure looks
+    nothing like the first -- gcc actually runs, then dies on `fatal error: Python.h: No such
+    file or directory`, which reads like a broken toolchain rather than a missing package.
+    """
+    import os
+    import sysconfig
+
+    include = sysconfig.get_paths().get("include")
+    return bool(include and os.path.exists(os.path.join(include, "Python.h")))
+
+
+def python_headers_package() -> str:
+    """The apt package supplying them, for the interpreter actually in use.
+
+    Version-specific on purpose. `python3-dev` installs headers for the distro's DEFAULT
+    python3, which on a machine running a newer interpreter is the wrong package -- and it
+    then fails identically to having installed nothing.
+    """
+    return f"python{sys.version_info.major}.{sys.version_info.minor}-dev"
+
+
 def check_platform() -> list[str]:
     """Report anything that will stop this working, before doing any work."""
     problems = []
@@ -93,6 +118,18 @@ def check_platform() -> list[str]:
     # ~60 frames deep on the first forward pass, inside throughput measurement, reading
     # "Failed to find C compiler" with no hint that it is a missing apt package. Reported by
     # a volunteer whose machine was otherwise correctly set up.
+    if has_nvidia_gpu() and not has_python_headers():
+        package = python_headers_package()
+        problems.append(
+            "Python development headers are missing (no Python.h), and this machine has\n"
+            "      an NVIDIA GPU. Triton builds a CPython extension to reach CUDA, so a\n"
+            "      compiler alone is not enough -- it gets as far as running gcc and then\n"
+            "      dies on 'fatal error: Python.h: No such file or directory'. Install them:\n"
+            f"        sudo apt install -y {package}          # Debian/Ubuntu\n"
+            "        sudo dnf install -y python3-devel         # Fedora/RHEL\n"
+            "      The version matters: python3-dev installs headers for the distro's\n"
+            "      default python3, which is the wrong one if you run a newer interpreter."
+        )
     if has_nvidia_gpu() and not has_c_compiler():
         problems.append(
             "no C compiler found, and this machine has an NVIDIA GPU.\n"
