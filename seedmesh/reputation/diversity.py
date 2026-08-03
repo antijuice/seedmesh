@@ -295,14 +295,29 @@ class ClusterIndex:
         b: ServerInfo,
         *,
         min_first_seen_gap_s: float = 0.0,
+        observer_age_s: Optional[float] = None,
     ) -> bool:
         """Whether two peers are plausibly under different operators.
 
         Used to pick verification pairs (spec section 9: "add a diversity constraint when
         selecting the verification pair"). Two peers are *not* independent if they share a
-        coarse cluster, if either is in the unknown bucket, or if they appeared within
-        ``min_first_seen_gap_s`` of each other -- simultaneous arrival is the signature of
-        one operator starting a fleet with a single script.
+        coarse cluster or if either is in the unknown bucket.
+
+        **The co-arrival rule needs an observer old enough to have a say.** ``first_seen`` is
+        when THIS CLIENT first saw a peer, not when the peer joined the swarm -- so a client
+        that just started sees every server arrive in the same instant, and the rule fires on
+        every pair. Measured on a live swarm: two directly-reachable servers, different
+        network clusters, and verification skipped seven times out of seven because a fresh
+        client cannot tell a sybil fleet from the entire swarm.
+
+        Treating that as "related" protects nothing. The information genuinely is not there,
+        and refusing every pair means no verification at all, which is strictly worse than a
+        verification whose co-arrival signal is unavailable -- the cluster check, which is
+        the actual anti-sybil defence, still applies either way.
+
+        So the rule is applied only when ``observer_age_s`` shows this client has been
+        watching for at least as long as the window it is judging. ``None`` means "unknown",
+        and keeps the old behaviour for callers that cannot say.
         """
         if a.peer_id == b.peer_id:
             return False
@@ -311,7 +326,12 @@ class ClusterIndex:
             return False
         if ca.coarse == cb.coarse:
             return False
-        if min_first_seen_gap_s > 0 and abs(a.first_seen - b.first_seen) < min_first_seen_gap_s:
+        can_judge_arrival = observer_age_s is None or observer_age_s >= min_first_seen_gap_s
+        if (
+            min_first_seen_gap_s > 0
+            and can_judge_arrival
+            and abs(a.first_seen - b.first_seen) < min_first_seen_gap_s
+        ):
             return False
         return True
 

@@ -271,10 +271,14 @@ def _server(peer_id, asn, first_seen=0.0, start=0, end=8):
     )
 
 
-def _sampler(**overrides):
+def _sampler(started_at=None, **overrides):
+    """`started_at` is when this observer began watching. Default: long ago, so the
+    co-arrival rule applies. A sampler that has only just started cannot judge arrival
+    times -- see `test_a_fresh_client_does_not_refuse_every_pair`."""
     scorer = ReputationScorer(ScorerConfig())
     return VerificationSampler(
-        scorer, ClusterIndex(), SamplerConfig(**overrides), rng=random.Random(0)
+        scorer, ClusterIndex(), SamplerConfig(**overrides), rng=random.Random(0),
+        started_at=started_at if started_at is not None else -10_000_000.0,
     )
 
 
@@ -307,11 +311,44 @@ def test_a_verifier_in_the_same_cluster_is_refused():
 
 
 def test_a_verifier_that_appeared_simultaneously_is_refused():
+    """Only meaningful for an observer that has been watching long enough to have seen them
+    arrive apart. This sampler has (default started_at is far in the past)."""
     sampler = _sampler(min_first_seen_gap_s=900.0)
     subject = _server("smsubject", asn=1, first_seen=1000.0)
     twin = _server("smtwin", asn=2, first_seen=1010.0)
 
     assert sampler.select_verifier(subject, RANGE, [twin]) is None
+
+
+def test_a_fresh_client_does_not_refuse_every_pair():
+    """`first_seen` is when THIS CLIENT first saw a peer, not when the peer joined. A client
+    that just started sees every server arrive at once, so the co-arrival rule fired on every
+    pair and verification could never run on a first run.
+
+    Measured on a live swarm before this fix: two directly-reachable servers in different
+    network clusters, and 7 skips out of 7 requests. Treating "I cannot tell" as "they are
+    related" protects nothing -- the information is absent either way -- while refusing every
+    pair means no verification at all. The cluster check still applies."""
+    import time as time_module
+
+    now = time_module.time()
+    sampler = _sampler(min_first_seen_gap_s=900.0, started_at=now)
+    subject = _server("smsubject", asn=1, first_seen=now)
+    other = _server("smother", asn=2, first_seen=now)
+
+    assert sampler.select_verifier(subject, RANGE, [other]) is not None
+
+
+def test_a_fresh_client_still_refuses_a_same_cluster_pair():
+    """The relaxation must not reach the actual anti-sybil defence."""
+    import time as time_module
+
+    now = time_module.time()
+    sampler = _sampler(min_first_seen_gap_s=900.0, started_at=now)
+    subject = _server("smsubject", asn=64999, first_seen=now)
+    sibling = _server("smsibling", asn=64999, first_seen=now)
+
+    assert sampler.select_verifier(subject, RANGE, [sibling]) is None
 
 
 def test_an_independent_verifier_is_accepted():
@@ -518,3 +555,56 @@ def test_plan_attributes_clusters_to_both_parties():
     assert task.subject_cluster == "asn:1"
     assert task.verifier_cluster == "asn:2"
     assert len(task.nonce) == 16
+
+
+# ---- "not sampled" and "no verifier" are different facts ---------------------
+#
+# `plan()` returns None for both, and the summary reported both as "no independent
+# verifier". An established peer sits at base_rate=0.03, so seven prompts expect 0.2
+# verifications -- and the report blamed the swarm. That message sent a live debugging
+# session chasing firewalls, announce addresses and diversity rules for hours while the
+# swarm was eligible the whole time.
+
+
+def _inline(rate, servers, monkeypatch=None):
+    from seedmesh.reputation.diversity import ClusterIndex
+    from seedmesh.verification.inline import InlineVerifier
+    from seedmesh.verification.sampler import SamplerConfig, VerificationSampler
+
+    sampler = VerificationSampler(
+        ReputationScorer(ScorerConfig()),
+        ClusterIndex(),
+        SamplerConfig(base_rate=rate, unproven_rate=rate, suspicion_rate=rate),
+        rng=random.Random(0),
+        started_at=-10_000_000.0,
+    )
+    return InlineVerifier(sampler, run_on=lambda *a, **k: None, discover=lambda: servers)
+
+
+def test_an_unsampled_request_is_not_reported_as_a_missing_verifier():
+    verifier = _inline(0.0, [])
+    verifier.not_sampled = 3
+    text = "\n".join(verifier.describe())
+    assert "not sampled" in text
+    assert "no independent verifier" not in text
+
+
+def test_a_genuinely_unverifiable_swarm_still_says_so():
+    """The relaxation must not hide the case the message exists for: a swarm that CANNOT
+    verify must never look like one that verified and found nothing wrong."""
+    verifier = _inline(1.0, [])
+    verifier.skipped_no_verifier = 2
+    text = "\n".join(verifier.describe())
+    assert "no independent verifier" in text
+
+
+def test_both_are_reported_when_both_happened():
+    verifier = _inline(1.0, [])
+    verifier.not_sampled = 5
+    verifier.skipped_no_verifier = 1
+    text = "\n".join(verifier.describe())
+    assert "not sampled" in text and "no independent verifier" in text
+
+
+def test_silence_when_nothing_happened_at_all():
+    assert _inline(1.0, []).describe() == []

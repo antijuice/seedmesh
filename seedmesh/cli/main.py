@@ -953,8 +953,20 @@ def _enable_verification(reputation, args: argparse.Namespace, dht) -> None:
     discover = make_discover(
         dht, block_uids, args.model, addresses=make_address_resolver(manager)
     )
+    sampler_config = None
+    if getattr(args, "verify_rate", None) is not None:
+        from seedmesh.verification.sampler import SamplerConfig
+
+        # Verification is normally sampled at a few percent. Forcing the rate is how you
+        # confirm the machinery works end to end without waiting for chance to select a
+        # request -- and how this swarm's first real verdict was obtained.
+        rate = max(0.0, min(1.0, args.verify_rate))
+        sampler_config = SamplerConfig(
+            base_rate=rate, unproven_rate=rate, suspicion_rate=rate, max_rate=max(rate, 0.75)
+        )
+
     reputation.enable_verification(
-        run_on=make_runner(manager, block_uids), discover=discover
+        run_on=make_runner(manager, block_uids), discover=discover, config=sampler_config
     )
     print("  verification on: a sample of requests will be re-checked on a second server")
 
@@ -1098,6 +1110,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="retries with a fresh session when a request stalls")
     chat.add_argument("--no-reputation", "--no_reputation", action="store_true",
                       help="do not measure servers, and do not publish or fetch reputation")
+    chat.add_argument("--verify-rate", "--verify_rate", type=float, default=None,
+                      help="force the fraction of requests re-checked on a second server "
+                           "(default: sampled at a few percent)")
     chat.add_argument("--no-verify", "--no_verify", action="store_true",
                       help="measure servers but do not re-check their work on a second one")
     chat.add_argument("--no-routing-gate", "--no_routing_gate", action="store_true",
@@ -1122,6 +1137,9 @@ def build_parser() -> argparse.ArgumentParser:
     gateway.add_argument("--timeout", type=float, default=CHAT_REQUEST_TIMEOUT)
     gateway.add_argument("--attempts", type=int, default=CHAT_ATTEMPTS)
     gateway.add_argument("--no-reputation", "--no_reputation", action="store_true")
+    gateway.add_argument("--verify-rate", "--verify_rate", type=float, default=None,
+                      help="force the fraction of requests re-checked on a second server "
+                           "(default: sampled at a few percent)")
     gateway.add_argument("--no-verify", "--no_verify", action="store_true")
     gateway.add_argument("--no-routing-gate", "--no_routing_gate", action="store_true")
     gateway.add_argument("--gossip-interval", "--gossip_interval", type=float,

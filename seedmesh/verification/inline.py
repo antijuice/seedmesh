@@ -88,6 +88,7 @@ class InlineVerifier:
         self.outcomes: List[VerificationOutcome] = []
         self.checked = 0
         self.skipped_no_verifier = 0
+        self.not_sampled = 0
         self.skipped_unlocated = 0
         """Skips where candidates DID host the blocks but none could be placed on a network.
         Counted apart because the two have different remedies: "nobody else hosts these
@@ -156,7 +157,17 @@ class InlineVerifier:
         self, step: CapturedStep, subject: ServerInfo, servers: List[ServerInfo]
     ) -> Optional[VerificationOutcome]:
         candidates = [s for s in servers if s.peer_id != subject.peer_id]
-        task = self.sampler.plan(subject, step.block_range, candidates)
+
+        # These are two different facts and `plan()` collapses them into one None.
+        # Reporting both as "no independent verifier" sent a real debugging session chasing
+        # firewalls and diversity rules for hours, when the swarm was eligible the whole
+        # time and the sampler simply had not selected that request: an established peer
+        # sits at base_rate=0.03, so seven prompts expect 0.2 verifications.
+        if not self.sampler.should_verify(subject.peer_id):
+            self.not_sampled += 1
+            return None
+
+        task = self.sampler.plan(subject, step.block_range, candidates, force=True)
         if task is None:
             # No independent, comparable partner. Recorded as a skip, never as a pass:
             # "could not check" and "checked and fine" must not look the same.
@@ -202,7 +213,7 @@ class InlineVerifier:
     # ---- reporting -------------------------------------------------------------
 
     def describe(self) -> List[str]:
-        if not self.checked and not self.skipped_no_verifier:
+        if not self.checked and not self.skipped_no_verifier and not self.not_sampled:
             return []
         lines = [f"  verified    {self.checked} request(s) against a second server"]
         tally: dict[str, int] = {}
@@ -210,6 +221,13 @@ class InlineVerifier:
             tally[outcome.verdict.value] = tally.get(outcome.verdict.value, 0) + 1
         if tally:
             lines.append("    " + ", ".join(f"{v} {k}" for k, v in sorted(tally.items())))
+        if self.not_sampled:
+            # Not a problem, and must not be shown as one. Verification is sampled, not
+            # exhaustive -- most requests are deliberately never checked.
+            lines.append(
+                f"    {self.not_sampled} not sampled (verification is a sample, not every "
+                "request)"
+            )
         if self.skipped_no_verifier:
             # Said out loud. A swarm that cannot verify must not look like one that verified
             # and found nothing wrong.

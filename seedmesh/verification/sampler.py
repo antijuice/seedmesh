@@ -133,6 +133,7 @@ class VerificationSampler:
         rng: Optional[random.Random] = None,
         history: Optional[PairHistory] = None,
         tolerances: Optional[ToleranceTable] = None,
+        started_at: Optional[float] = None,
     ) -> None:
         self.scorer = scorer
         self.clusters = clusters
@@ -140,6 +141,15 @@ class VerificationSampler:
         self.rng = rng or random.Random()
         self.history = history or PairHistory()
         self.tolerances = tolerances
+        # When this observer began watching. The co-arrival rule compares peers'
+        # `first_seen`, which is OUR first sighting -- so a client that just started sees
+        # every server arrive at once and would refuse every pair. See
+        # `ClusterIndex.are_independent`.
+        self.started_at = started_at if started_at is not None else scorer.clock.now()
+
+    def observer_age(self) -> float:
+        """How long this client has been watching the swarm."""
+        return max(0.0, self.scorer.clock.now() - self.started_at)
 
     def _tolerance_for(self, subject: ServerInfo, verifier: ServerInfo) -> Optional[Tolerance]:
         """Tolerance for this pair, or ``None`` if the pair cannot be judged.
@@ -183,7 +193,10 @@ class VerificationSampler:
             if self.scorer.breakdown(candidate.peer_id).is_quarantined:
                 continue
             if cfg.require_distinct_cluster and not self.clusters.are_independent(
-                subject, candidate, min_first_seen_gap_s=cfg.min_first_seen_gap_s
+                subject,
+                candidate,
+                min_first_seen_gap_s=cfg.min_first_seen_gap_s,
+                observer_age_s=self.observer_age(),
             ):
                 continue
             if self.tolerances is not None and not self.tolerances.can_compare(
