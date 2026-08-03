@@ -16,11 +16,17 @@ The mechanism, measured and traced through go-libp2p v0.32.1:
   * Without a public address, `holepunch/svc.go` never registers `/libp2p/dcutr` (svc.go:111)
     and `holepuncher.go:215` refuses to initiate -- "aborting hole punch initiation as we
     have no public address". So hole punching cannot rescue this peer in either role.
-  * The remaining path is a circuit relay, which go-libp2p severs after 128 KiB -- fine for a
-    toy model, useless for a real one.
+  * The remaining path is a circuit relay.
 
-So the diagnosis is binary and worth stating plainly: either this host learns a public
-address, or it needs a port forward to be useful for anything larger than a demo.
+CORRECTED 2026-08-03. This module used to say a relay is severed at 128 KiB and that a
+relay-only host is 'useless for a real model'. Both were measured on a ONE-bootstrap
+swarm and neither holds here: a relay-only server has since hosted all 32 blocks of an
+8B model on this swarm and answered real requests. What a relay-only host actually
+loses is being a VERIFICATION partner -- it cannot be placed on a network, so nobody
+can show it is independent of the peer it checks.
+
+It also used to count bootstrap peers from swarm.json rather than probing them, which
+meant one dead droplet made every machine on earth look symmetric-NAT'd.
 """
 
 from __future__ import annotations
@@ -29,7 +35,7 @@ import ipaddress
 import re
 import time
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 # Below this many bootstrap peers, a public address cannot be learned even on a friendly NAT
 # -- there are not enough observers to reach ActivationThresh.
@@ -73,8 +79,37 @@ class Diagnosis:
     can_host_large_models: bool
 
 
+def reachable_bootstrap_peers(peers, timeout: float = 6.0):
+    """Which bootstrap peers actually accept a TCP connection right now. Returns (up, down).
+
+    CONFIGURED IS NOT REACHABLE, and conflating the two produced the worst output this tool
+    can produce: a confident wrong diagnosis. One of four droplets was down, so only three
+    observers existed, so `ActivationThresh = 4` could never be met -- and `doctor`, which
+    counted entries in swarm.json, reported symmetric-nat. It blamed a volunteer's router
+    for a dead server while that volunteer's machine was serving an 8B model perfectly well.
+    """
+    import socket
+
+    up, down = [], []
+    for peer in peers:
+        match = ADDR_RE.search(str(peer))
+        if not match:
+            continue
+        host, port = match.group(1), int(match.group(2))
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                up.append(host)
+        except Exception:
+            down.append(host)
+    return up, down
+
+
 def diagnose(
-    addresses: List[Address], n_peers: int, waited: float, timeout: float
+    addresses: List[Address],
+    n_peers: int,
+    waited: float,
+    timeout: float,
+    unreachable: Optional[List[str]] = None,
 ) -> Diagnosis:
     """Turn observed addresses into an actionable verdict.
 
@@ -82,6 +117,7 @@ def diagnose(
     the full timeout, with enough peers" has exactly one common explanation worth acting on,
     and saying so is more useful than listing four possibilities.
     """
+    unreachable = list(unreachable or [])
     public = [a for a in addresses if a.kind == "public"]
 
     if public:
@@ -95,12 +131,19 @@ def diagnose(
         )
 
     if n_peers < MIN_BOOTSTRAP_PEERS:
+        offline = f" ({', '.join(unreachable)} did not answer)" if unreachable else ""
         return Diagnosis(
             "too-few-peers",
-            f"Only {n_peers} bootstrap peer(s) reachable, and {MIN_BOOTSTRAP_PEERS} are\n"
-            f"  needed before a host can learn its own public address (go-libp2p accepts an\n"
-            f"  observed address only after four distinct peers report it).\n"
-            f"  This is a swarm configuration problem, not a problem with your network.",
+            f"Only {n_peers} bootstrap peer(s) are REACHABLE{offline}, and\n"
+            f"  {MIN_BOOTSTRAP_PEERS} are needed before a host can learn its own public\n"
+            f"  address -- go-libp2p accepts an observed address only after four DISTINCT\n"
+            f"  peers report it, so three can never be enough however good your network is.\n\n"
+            f"  This is the swarm's problem, not yours. Nothing you change on this machine\n"
+            f"  can produce a public address until a fourth bootstrap peer is back.\n\n"
+            f"  Serving still works meanwhile: measured on this swarm, a relay-only server\n"
+            f"  hosted all 32 blocks of an 8B model and answered real requests. What you\n"
+            f"  lose is being usable as a verification partner, because a relayed peer\n"
+            f"  cannot be placed on a network.",
             False,
         )
 
@@ -120,11 +163,14 @@ def diagnose(
         "  Consequences, stated plainly:\n"
         "    - Hole punching cannot help. go-libp2p refuses to initiate without a public\n"
         "      address, and never registers the responder handler either.\n"
-        "    - Your only remaining path is a circuit relay, which is severed after 128 KiB.\n"
-        "      That is under one request for any real model.\n\n"
-        "  What actually works: forward a TCP port to this machine and host with\n"
-        "    seedmesh serve --host-maddrs /ip4/0.0.0.0/tcp/31338\n"
-        "  You can still USE the swarm as a client with no changes at all.",
+        "    - You cannot act as a verification partner: a relayed peer cannot be placed\n"
+        "      on a network, so nobody can show you are independent of who you check.\n\n"
+        "  What this does NOT mean: that you cannot serve. Measured on this swarm, a\n"
+        "  relay-only server hosted all 32 blocks of an 8B model and answered real\n"
+        "  requests. An earlier version of this message said a relay is severed at\n"
+        "  128 KiB, which was measured on a ONE-bootstrap swarm and does not hold here.\n\n"
+        "  If you want direct reachability anyway, forward a TCP port and host with\n"
+        "    seedmesh serve --host-maddrs /ip4/0.0.0.0/tcp/31338",
         False,
     )
 
@@ -140,7 +186,12 @@ def cmd_doctor(args) -> int:
         return 2
 
     print("\nchecking whether this machine can be dialled by other peers")
-    print(f"  listening on 0.0.0.0:{args.port}, connecting to {len(peers)} bootstrap peer(s)...")
+    # Probe before listening: "four peers configured" and "four peers answering" are
+    # different facts, and only the second one can satisfy ActivationThresh.
+    up, down = reachable_bootstrap_peers(peers)
+    print(f"  {len(up)} of {len(peers)} bootstrap peer(s) answering"
+          + (f"; unreachable: {', '.join(down)}" if down else ""))
+    print(f"  listening on 0.0.0.0:{args.port}...")
     print("  (this listens like a real server -- a client-mode check cannot answer this)")
 
     try:
@@ -184,7 +235,7 @@ def cmd_doctor(args) -> int:
     if not addresses:
         print("  (none)")
 
-    result = diagnose(addresses, len(peers), waited, args.timeout)
+    result = diagnose(addresses, len(up), waited, args.timeout, unreachable=down)
     print(f"\n=== {result.verdict} ===")
     print(f"  {result.detail}")
     return 0 if result.can_host_large_models else 1

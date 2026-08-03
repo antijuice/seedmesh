@@ -635,7 +635,10 @@ def test_too_few_peers_is_blamed_on_the_swarm_not_the_volunteer():
 
     result = diagnose([Address("10.0.0.155", 31338)], n_peers=2, waited=120, timeout=120)
     assert result.verdict == "too-few-peers"
-    assert "not a problem with your network" in result.detail
+    assert "swarm's problem, not yours" in result.detail
+    # It must count REACHABLE peers, not configured ones -- one dead droplet once made
+    # every machine on earth look symmetric-NAT'd.
+    assert "REACHABLE" in result.detail
 
 
 def test_symmetric_nat_is_named_with_a_remedy():
@@ -643,10 +646,46 @@ def test_symmetric_nat_is_named_with_a_remedy():
 
     result = diagnose([Address("10.0.0.155", 31338)], n_peers=4, waited=120, timeout=120)
     assert result.verdict == "symmetric-nat"
-    assert not result.can_host_large_models
-    assert "128 KiB" in result.detail, "say why a relay will not save them"
-    assert "--host-maddrs" in result.detail, "and give the command that does work"
-    assert "USE the swarm as a client" in result.detail, "they are not shut out entirely"
+    assert "--host-maddrs" in result.detail, "give the command that does work"
+    # CORRECTED. This asserted "128 KiB" and that the volunteer could not host a real model.
+    # Both were measured on a ONE-bootstrap swarm and are false here: a relay-only server
+    # has since hosted all 32 blocks of an 8B model on this swarm. What such a peer really
+    # loses is being a VERIFICATION partner.
+    assert "verification partner" in result.detail
+    assert "hosted all 32 blocks" in result.detail, "do not tell them serving is impossible"
+
+
+def test_a_dead_bootstrap_peer_is_not_blamed_on_the_volunteers_router():
+    """The bug this fixes: `doctor` counted peers in swarm.json rather than probing them.
+    One droplet was down, so only three observers existed, ActivationThresh=4 could never be
+    met -- and it reported symmetric-nat at a machine that was serving an 8B model fine."""
+    from seedmesh.cli.doctor import Address, diagnose
+
+    result = diagnose(
+        [Address("10.0.0.155", 31338)], n_peers=3, waited=120, timeout=120,
+        unreachable=["159.89.52.179"],
+    )
+    assert result.verdict == "too-few-peers"
+    assert "159.89.52.179" in result.detail, "name the peer that is down"
+    assert "symmetric" not in result.detail.lower()
+
+
+def test_reachability_probing_separates_up_from_down():
+    from seedmesh.cli.doctor import reachable_bootstrap_peers
+
+    # 192.0.2.0/24 is TEST-NET-1: reserved, guaranteed not to route anywhere.
+    up, down = reachable_bootstrap_peers(
+        ["/ip4/192.0.2.1/tcp/31337/p2p/Qm", "/ip4/192.0.2.2/tcp/31337/p2p/Qm"], timeout=0.4
+    )
+    assert up == []
+    assert down == ["192.0.2.1", "192.0.2.2"]
+
+
+def test_reachability_ignores_unparseable_peers():
+    from seedmesh.cli.doctor import reachable_bootstrap_peers
+
+    up, down = reachable_bootstrap_peers(["/dns4/example.com/tcp/1/p2p/Qm"], timeout=0.4)
+    assert up == [] and down == []
 
 
 def test_an_interrupted_wait_is_not_diagnosed_as_symmetric_nat():
