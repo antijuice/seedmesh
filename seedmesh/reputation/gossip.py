@@ -307,10 +307,20 @@ class ReputationGossip:
             f"unchanged {stats.unchanged}, rejected {stats.rejected}",
         ]
         if stats.publish_retries or stats.publish_failures:
+            # "reported failed", not "lost". Measured 2026-08-03 against the live swarm:
+            # `store()` returned False for 2 of 6 keys that a SECOND, independent client
+            # could then read back perfectly well. The boolean under-reports success, so
+            # counting it as loss overstates the problem -- and an earlier note in this
+            # project recorded a "1 in 3 failure rate" from exactly that mistake.
             lines.append(
                 f"  DHT stores  {stats.publish_retries} retry(ies), "
-                f"{stats.publish_failures} round(s) lost"
+                f"{stats.publish_failures} round(s) reported failed"
             )
+            if stats.publish_failures:
+                lines.append(
+                    "    (the DHT's return value under-reports success -- a 'failed' store"
+                    " often propagates)"
+                )
         for reason, count in sorted(stats.rejections.items(), key=lambda kv: -kv[1]):
             lines.append(f"    rejected x{count}: {reason}")
         return lines

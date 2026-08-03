@@ -965,8 +965,17 @@ def _enable_verification(reputation, args: argparse.Namespace, dht) -> None:
             base_rate=rate, unproven_rate=rate, suspicion_rate=rate, max_rate=max(rate, 0.75)
         )
 
+    # Load the real ASN table if there is one. Prefix clustering grades two machines in one
+    # datacentre as different operators, which is exactly the pair verification must refuse.
+    from seedmesh.reputation.clusters import build_cluster_index
+
+    clusters, cluster_lines = build_cluster_index(getattr(args, "asn_table", None))
+    for line in cluster_lines:
+        print(line)
+
     reputation.enable_verification(
-        run_on=make_runner(manager, block_uids), discover=discover, config=sampler_config
+        run_on=make_runner(manager, block_uids), discover=discover, config=sampler_config,
+        clusters=clusters,
     )
     print("  verification on: a sample of requests will be re-checked on a second server")
 
@@ -1110,6 +1119,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="retries with a fresh session when a request stalls")
     chat.add_argument("--no-reputation", "--no_reputation", action="store_true",
                       help="do not measure servers, and do not publish or fetch reputation")
+    chat.add_argument("--asn-table", "--asn_table", default=None,
+                      help="ip2asn TSV for operator-level clustering "
+                           "(default: data/ip2asn-combined.tsv.gz)")
     chat.add_argument("--verify-rate", "--verify_rate", type=float, default=None,
                       help="force the fraction of requests re-checked on a second server "
                            "(default: sampled at a few percent)")
@@ -1137,6 +1149,9 @@ def build_parser() -> argparse.ArgumentParser:
     gateway.add_argument("--timeout", type=float, default=CHAT_REQUEST_TIMEOUT)
     gateway.add_argument("--attempts", type=int, default=CHAT_ATTEMPTS)
     gateway.add_argument("--no-reputation", "--no_reputation", action="store_true")
+    gateway.add_argument("--asn-table", "--asn_table", default=None,
+                      help="ip2asn TSV for operator-level clustering "
+                           "(default: data/ip2asn-combined.tsv.gz)")
     gateway.add_argument("--verify-rate", "--verify_rate", type=float, default=None,
                       help="force the fraction of requests re-checked on a second server "
                            "(default: sampled at a few percent)")

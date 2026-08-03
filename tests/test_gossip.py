@@ -456,8 +456,15 @@ def test_a_persistently_dead_store_is_reported_not_silent():
     assert node.publish() is None
     assert node.stats.publish_failures == 1
     # The point of counting it: "published 0" with no explanation looks like "nothing to say"
-    # when it actually means "the swarm never heard any of this".
-    assert any("round(s) lost" in line for line in node.describe())
+    # when it may mean "the swarm never heard any of this".
+    lines = node.describe()
+    assert any("reported failed" in line for line in lines)
+    # But NOT "lost". Measured against the live swarm: store() returned False for 2 of 6
+    # keys a second, independent client could then read back perfectly well. The boolean
+    # under-reports success, and an earlier note in this project recorded a "1 in 3 failure
+    # rate" from trusting it.
+    assert not any("round(s) lost" in line for line in lines)
+    assert any("under-reports success" in line for line in lines)
 
 
 # ---- re-reading a record is not an attack ------------------------------------
